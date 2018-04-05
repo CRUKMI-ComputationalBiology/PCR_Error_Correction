@@ -42,8 +42,8 @@ my $VERSION = "PCR Error Correctiopn (PEC) Algorithm Version 2, 14 Dec. 2017";
 #  Configure the MPI command & parameters on your system
 #
 
-my $MPI_Command_main = "mpirun";
-my $MPI_Command_misc = "--mca mpi_warn_on_fork 0 --mca orte_base_help_aggregate 0 --mca orte_tmpdir_base /dev/shm";
+my $MPI_Command_main = "mpi_command";
+my $MPI_Command_misc = "Any parameters for mpi_command";
 
 my $CPU = 1;
 my $MR_PAGE_SIZE = 1024;

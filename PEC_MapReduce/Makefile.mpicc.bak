@@ -1,0 +1,24 @@
+# MPI-based makefile using mpic++ and mpicc
+
+MR_INC = /lustre/home/d417/changkim/LIBs/mrmpi-7Apr14/src
+MR_LIB = /lustre/home/d417/changkim/LIBs/mrmpi-7Apr14/src/libmrmpi_mpicc.a
+
+Zlib_INC = /lustre/home/d417/changkim/LIBs/zlib-1.2.11/
+Zlib_LIB = /lustre/home/d417/changkim/LIBs/zlib-1.2.11/libz.a
+
+GMP_INC = /lustre/home/d417/changkim/LIBs/GMP/include/
+GMP_LIB = /lustre/home/d417/changkim/LIBs/GMP/lib/
+
+CC =		mpicxx
+CXX =		mpicxx 
+CCFLAGS =	-std=c++0x -m64 -g -O2 -Wno-long-long -Wno-deprecated -I$(MR_INC) -I$(Zlib_INC) -I$(GMP_INC)
+LINK =		mpicxx
+LINKFLAGS =	-std=c++0x -m64 -g -O2 -Wno-long-long -Wno-deprecated -L$(GMP_LIB) -lgmp -lgmpxx
+USRLIB_0 =	$(MR_LIB) 
+USRLIB_1 = 	$(Zlib_LIB) 
+USRLIB_2 =	
+USRLIB_3 =	
+USRLIB_4 = 
+SYSLIB =
+
+include Makefile.common

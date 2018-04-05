@@ -1,0 +1,24 @@
+# Targets
+
+OBJS = pec_algorithm.o mrSubroutine.o Fasta_reader.o sequenceUtil.o stacktrace.o Fasta_entry.o string_util.o IRKE.o KmerCounter.o argProcessor.o ssw.o ssw_cpp.o Fastq_entry.o Fastq_reader.o
+
+EXECUTABLE = pec_algorithm 
+
+all:	pec_algorithm	
+
+pec_algorithm:	$(OBJS) $(USRLIB_0) $(USRLIB_1) $(USRLIB_4) $(USRLIB_2) $(USRLIB_3)
+	$(LINK) $(LINKFLAGS) $(OBJS) $(USRLIB_0) $(USRLIB_1) $(USRLIB_2) $(USRLIB_3) $(USRLIB_4) $(SYSLIB) -o $(EXECUTABLE) 
+
+clean:
+	rm $(OBJS) $(EXECUTABLE)
+
+clean_obj:
+	rm $(OBJS) 
+
+# Rules
+
+%.o:%.cpp
+	$(CXX) $(CCFLAGS) -c $<
+
+%.o:%.c
+	$(CC) $(CCFLAGS) -c $<

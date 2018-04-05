@@ -1,0 +1,85 @@
+#include "mpi.h"
+#include "zlib.h"
+
+#include "stdio.h"
+#include "stdlib.h"
+#include "string.h"
+#include "sys/stat.h"
+
+#define __STDC_LIMIT_MACROS
+#include "mapreduce.h"
+#include "keyvalue.h"
+#include "blockmacros.h"
+
+#include "fstream"
+#include "iostream"
+#include "sstream"
+
+#include "vector"
+#include "map"
+#include "set"
+#include "algorithm"
+#include "time.h"
+#include "math.h"
+#include "boost/math/special_functions/binomial.hpp"
+
+#include "boost/math/distributions/binomial.hpp"
+#include "boost/math/distributions/chi_squared.hpp"
+#include "boost/math/distributions/poisson.hpp"
+
+#include "Fasta_reader.hpp"
+#include "sequenceUtil.hpp"
+
+#include "FastQFile.h"
+
+#include "ssw_cpp.h"
+
+using namespace MAPREDUCE_NS;
+using namespace std;
+
+using boost::math::binomial;
+using boost::math::chi_squared;
+using boost::math::poisson;
+
+void fileread_RNAseq_HeadSeq_FASTA(int itask, char *fname, KeyValue *kv, void *ptr);
+void fileread_RNAseq_HeadSeq_FASTQ(int itask, char *fname, KeyValue *kv, void *ptr);
+
+void fileread_AlignmentInfo(int itask, char *fname, KeyValue *kv, void *ptr);
+int parse_cigar_softclipping(char *s);
+
+void reduce_Link_from_Header(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+void reduce_LinkID_HeadSeq(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+
+void reduce_consensus_clustering(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+
+void Get_DirectionStrand(string head_seq, int *PE_direction, int *Strand, string ref_seq, int data_range);
+void get_consensus(StripedSmithWaterman::Alignment alignment, string seq, int *num_consensus);
+int check_deletion_consensus(int *num_consensus1, int *num_consensus2, int len_consensus, int num_sp1, int num_sp2);
+int check_deletion_consensus_single(int *num_consensus, int len_consensus, int num_sp);
+
+string check_consensus_sequence(const char *ref_seq, int *check_error, int *num_consensus1, int *num_consensus2, int len_consensus, int num_sp1, int num_sp2, int *loc_consensus);
+string check_consensus_seq_single(const char *ref_seq, int *check_error, int *num_consensus, int len_consensus, int num_sp, int *loc_consensus);
+
+void print_reads(std::ofstream &outFile, StripedSmithWaterman::Alignment alignment, string seq, string quality, int *READ, int *Qvalue, int idRead, int csen_len, int numRead);
+void Cal_pcrEfficiency(int *OUT, int cseq_len, int num, string cseq, int *cseq_loc, int *READ_1, int *READ_2, int *QUA_1, int *QUA_2, int qval_threshold);
+void DecomposeError_NGS_PCR(int *Error, string csequence, int *cseq_loc, int cseq_len, int num, int *READ_1, int *READ_2, int *Quality_1, int *Quality_2, int qThreshold);
+void extract_read_quality(StripedSmithWaterman::Alignment alignment, string seq, string quality, int *READ, int *Qvalue, int idRead, int csen_len, int numRead);
+
+void reduce_pvalue_clustering(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+//void reduce_pvalue_chiSquareFit(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+
+int Cal_Hamming(int *loc_consen, int cseq_len, int num, int *READ_1, int *READ_2, int *Qvalue_1, int *Qvalue_2, int qThres);
+long double Cal_P_pcr(double lamda, double mu, int n, int G, int s, int m);
+
+void map_extracting_Mi_ngs(uint64_t itask, char *key, int keybytes, char *value, int valuebytes, KeyValue *kv, void *ptr);
+void map_EM_clustering(uint64_t itask, char *key, int keybytes, char *value, int valuebytes, KeyValue *kv, void *ptr);
+
+void reduce_errorCorrection_reads(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+string get_cleanRead(const char *consen_seq, StripedSmithWaterman::Alignment alignment, string seq, int *len);
+void print_unCleaned_reads(char *multivalue, int nvalues, int *valuebytes, int data_range, std::ofstream &outFile_R1, std::ofstream &outFile_R2, bool ftype);
+
+void reduce_base_contrast(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+string check_base_contrast(int *base_contrast, int *depth, int *num_consensus1, int *num_consensus2, int len_consensus, int num_sp1, int num_sp2, int * loc_consensus);
+void get_error_quality(std::ofstream &outFile, StripedSmithWaterman::Alignment alignment, string seq, string quality, int *loc_consensus, int *base_contrast, int *depth, int num_sp1, int num_sp2);
+void get_quality_counts(StripedSmithWaterman::Alignment alignment, string seq, string quality, int *loc_consensus, int *base_contrast, int *depth, int num_sp1, int num_sp2, uint64_t *error_bin, uint64_t *nerror_bin);
+

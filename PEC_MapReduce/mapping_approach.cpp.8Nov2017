@@ -1,0 +1,1288 @@
+/*
+  Copyright (C) 2017, Cancer Research UK Manchester Institute
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+
+*/
+
+#include "mpi.h"
+#include "zlib.h"
+
+#include "stdio.h"
+#include "stdlib.h"
+#include "string.h"
+#include "sys/stat.h"
+
+#define __STDC_LIMIT_MACROS
+#include "mapreduce.h"
+#include "keyvalue.h"
+#include "blockmacros.h"
+#include "typedefs.h"
+
+#include "fstream"
+#include "iostream"
+#include "sstream"
+
+#include "vector"
+#include "map"
+#include "set"
+#include "algorithm"
+#include "time.h"
+#include "math.h"
+
+#include "Fasta_reader.hpp"
+#include "sequenceUtil.hpp"
+
+#include "IRKE.hpp"
+#include "KmerCounter.hpp"
+#include "stacktrace.hpp"
+#include "argProcessor.hpp"
+
+#include "mrSubroutine.h"
+
+using namespace MAPREDUCE_NS;
+using namespace std;
+
+void Execute(const char * command) {
+    int ret = system(command);
+    if (ret != 0) {
+        cout << "COMMAND: " << command << endl;
+        cout << "Died with exit code " << ret << endl;
+        cout << "Exiting." << endl;
+        exit(-1);
+    }
+}
+
+int main(int narg, char **args)
+{
+  MPI_Init(&narg,&args);
+
+  Data data;
+
+  MPI_Comm_rank(MPI_COMM_WORLD,&data.me);
+  MPI_Comm_size(MPI_COMM_WORLD,&data.nprocs);
+
+  data.kmer_length = 30;
+
+  int page_size = 128;
+  data.mismatch = 0;
+  data.MAQ = 10;
+  data.bQscore = 20;
+  data.soft_allow = 0.0;
+
+  data.On_Target = false;
+
+  string SampleName, freq_filename, typeFile, fname_ref, scratch_dir;
+
+  int num_args = 1;
+  try {
+       ArgProcessor in_args(narg, args);
+
+       if (in_args.isArgSet("--SoftClip")) {
+            data.soft_allow = in_args.getFloatVal("--SoftClip");
+            num_args += 2;
+            if(data.me==0) cerr << "Allowed soft clip proportion set to: " << data.soft_allow << endl;
+       }
+	
+       if (in_args.isArgSet("--K")) {
+            data.kmer_length = in_args.getIntVal("--K");
+            num_args += 2;
+            if(data.me==0) cerr << "Kmer length set to: " << data.kmer_length << endl;
+       }
+
+       if(in_args.isArgSet("--PageSize")) {
+            page_size = in_args.getIntVal("--PageSize");
+            num_args += 2;
+            if(data.me==0) cerr << "Page size for map reduce object set to: " << page_size << endl;
+       }
+
+       if(in_args.isArgSet("--MAQ")) {
+            data.MAQ = in_args.getIntVal("--MAQ");
+            num_args += 2;
+            if(data.me==0) cerr << "Mapping Quality set to: " << data.MAQ << endl;
+       } 
+
+       if(in_args.isArgSet("--BQScore")) {
+            data.bQscore = in_args.getIntVal("--BQScore");
+            num_args += 2;
+            if(data.me==0) cerr << "Phred Score set to: " << data.bQscore << endl;
+       } 
+
+       if(in_args.isArgSet("--Target")) {
+            data.filename = in_args.getStringVal("--Target");
+            num_args += 2;
+            data.On_Target = true;
+            if(data.me==0) cerr << "Target Region file was given as: " << data.filename << endl;
+       } 
+
+       if(in_args.isArgSet("--FreqTable")) {
+            freq_filename = in_args.getStringVal("--FreqTable");
+            num_args += 2;
+            if(data.me==0) cerr << "filename for freq Table was given as: " << freq_filename << endl;
+       }
+
+       if(in_args.isArgSet("--Ref")) {
+            fname_ref = in_args.getStringVal("--Ref");
+            num_args += 2;
+            if(data.me==0) cerr << "filename for HG Reference was given as: " << fname_ref << endl;
+       }
+
+       if(in_args.isArgSet("--Scratch")) {
+            scratch_dir = in_args.getStringVal("--Scratch");
+            num_args += 2;
+            if(data.me==0) cerr << "filename for scratch dir was given as: " << scratch_dir << endl;
+       }
+
+       if(in_args.isArgSet("--type")) {
+            typeFile = in_args.getStringVal("--type");
+            num_args += 2;
+       }
+
+       if(in_args.isArgSet("--SM")) {
+            SampleName = in_args.getStringVal("--SM");
+            num_args += 2; 
+      }
+      
+
+  }
+
+  catch(exception& e) {
+        cerr << "error: " << e.what() << "\n";
+        return 1;
+  }
+
+// ################################################
+//
+
+ data.OVERLAP = data.kmer_length;
+
+ data.MAX_RECURSION = 1;
+ data.MIN_SEED_ENTROPY = 1.5;
+ data.MIN_SEED_COVERAGE = 2;
+
+ data.DS = false;
+
+ data.PACMAN = false;
+ data.CRAWL = false;
+ data.crawl_length = 1;
+ data.min_any_entropy = 0.0;
+
+ data.prune_error_kmers = true;
+ data.min_ratio_non_error = 0.05f;
+ data.min_kmer_count = 1;
+
+ data.MIN_CONNECTIVITY_RATIO = 0.0;
+ data.MIN_ASSEMBLY_LENGTH = 1; //data.kmer_length;
+ data.MIN_ASSEMBLY_COVERAGE = 0.1;
+
+// ##################################################
+//
+
+  MapReduce *mrLink = new MapReduce(MPI_COMM_WORLD);
+  mrLink->memsize = page_size;
+  mrLink->verbosity = 1;
+  mrLink->timer = 1;
+  mrLink->set_fpath(scratch_dir.c_str());
+ 
+  MapReduce *mrSeq = new MapReduce(MPI_COMM_WORLD);
+  mrSeq->memsize = page_size;
+  mrSeq->verbosity = 1;
+  mrSeq->timer = 1;
+  mrSeq->set_fpath(scratch_dir.c_str());
+
+  MapReduce *mrBuffer = new MapReduce(MPI_COMM_WORLD);
+  mrBuffer->memsize = page_size;
+  mrBuffer->verbosity = 1;
+  mrBuffer->timer = 1;
+  mrBuffer->set_fpath(scratch_dir.c_str());
+
+  MapReduce *mrEkmer = new MapReduce(MPI_COMM_WORLD);
+  mrEkmer->memsize = page_size;
+  mrEkmer->verbosity = 1;
+  mrEkmer->timer = 1;
+  mrEkmer->set_fpath(scratch_dir.c_str());
+
+//################################################
+//
+
+ data.min_csize = 5;
+ data.flank = 200;
+
+// data.error_rate = 4.0;
+
+ data.On_Alignment = true;
+ data.On_Assemble = false;
+
+// data.On_Target = true;  // OnTarget or OffTarget harvesting switch
+
+ data.On_smallCluster = true;
+
+ data.On_Clean = true;  // Switch for error cleaning on input reads
+
+ bool On_Error_Clean = false;  // Error Cleaning switch
+ bool On_Clustering = true;  // Clustering switch
+
+// ##############################################
+
+data.loc_vector = 0;
+while( data.On_Target ) {
+
+  FILE* FS;
+  FS = fopen(data.filename.c_str(), "r");
+
+  while (!feof(FS)) {
+    char temp_string[300];
+    fgets(temp_string, 300, FS);
+
+    char dummy[5];
+    char gene[15];
+    ExonLoc _loc_info;
+
+    int n = sscanf(temp_string, "%s %llu %llu %s", dummy, &_loc_info.loc1, &_loc_info.loc2, gene);
+    if(n < 4) break;
+
+    _loc_info.chr = 0;
+    if(      strcmp(dummy, "chr1") == 0) _loc_info.chr = 1;
+    else if( strcmp(dummy, "chr2") == 0) _loc_info.chr = 2;
+    else if( strcmp(dummy, "chr3") == 0) _loc_info.chr = 3;
+    else if( strcmp(dummy, "chr4") == 0) _loc_info.chr = 4;
+    else if( strcmp(dummy, "chr5") == 0) _loc_info.chr = 5;
+    else if( strcmp(dummy, "chr6") == 0) _loc_info.chr = 6;
+    else if( strcmp(dummy, "chr7") == 0) _loc_info.chr = 7;
+    else if( strcmp(dummy, "chr8") == 0) _loc_info.chr = 8;
+    else if( strcmp(dummy, "chr9") == 0) _loc_info.chr = 9;
+    else if( strcmp(dummy,"chr10") == 0) _loc_info.chr = 10;
+    else if( strcmp(dummy,"chr11") == 0) _loc_info.chr = 11;
+    else if( strcmp(dummy,"chr12") == 0) _loc_info.chr = 12;
+    else if( strcmp(dummy,"chr13") == 0) _loc_info.chr = 13;
+    else if( strcmp(dummy,"chr14") == 0) _loc_info.chr = 14;
+    else if( strcmp(dummy,"chr15") == 0) _loc_info.chr = 15;
+    else if( strcmp(dummy,"chr16") == 0) _loc_info.chr = 16;
+    else if( strcmp(dummy,"chr17") == 0) _loc_info.chr = 17;
+    else if( strcmp(dummy,"chr18") == 0) _loc_info.chr = 18;
+    else if( strcmp(dummy,"chr19") == 0) _loc_info.chr = 19;
+    else if( strcmp(dummy,"chr20") == 0) _loc_info.chr = 20;
+    else if( strcmp(dummy,"chr21") == 0) _loc_info.chr = 21;
+    else if( strcmp(dummy,"chr22") == 0) _loc_info.chr = 22;
+    else if( strcmp(dummy, "chrX") == 0) _loc_info.chr = 23;
+    else if( strcmp(dummy, "chrY") == 0) _loc_info.chr = 24;
+    else if( strcmp(dummy, "chrM") == 0) _loc_info.chr = 25;
+
+    if( (_loc_info.chr >= 1) && (_loc_info.chr <= 25) ) {
+        string gname(gene);
+        gname = remove_whitespace(gname);
+        data._target_gene.push_back(gname);
+        data._target_loc.push_back(_loc_info);
+
+	data.loc_vector++;
+    }
+  }
+
+  fclose(FS);
+  break;
+}
+
+  data.loc_vector--;
+
+// ###############################################
+
+ double tstart = MPI_Wtime();
+
+ if(data.me == 0) cerr << endl << " Uploading  Reference Seq..... " << endl << endl;
+ data.filename.assign(fname_ref);
+ mrBuffer->map(data.nprocs,map_upload_reference,&data);
+
+ data.reference_sequence.resize(27);
+ mrBuffer->map(mrBuffer,map_assign_reference,&data);
+
+ for(int i=0; i<25; i++) {
+
+	int tmp_root;
+	if(data.reference_sequence[i+1].empty()) tmp_root = 0;
+	else	   				 tmp_root = data.me;
+
+	int root;
+	MPI_Allreduce(&tmp_root, &root, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+
+	if(data.reference_sequence[i+1].empty()) tmp_root = 0;
+	else	                                 tmp_root = data.reference_sequence[i+1].length();
+
+	int seq_len;
+	MPI_Allreduce(&tmp_root, &seq_len, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+	
+	char *tmp_seq = (char *) malloc( sizeof(char)*seq_len );
+	if(!data.reference_sequence[i+1].empty()) memcpy( tmp_seq, data.reference_sequence[i+1].c_str(), seq_len );
+
+	MPI_Bcast( tmp_seq, seq_len, MPI_CHAR, root, MPI_COMM_WORLD);
+
+	if(data.reference_sequence[i+1].empty()) {
+		string tmp_str;
+		tmp_str.assign( tmp_seq, seq_len );
+		data.reference_sequence.at(i+1) = tmp_str;
+	}
+
+	free(tmp_seq);
+ }
+
+ MPI_Barrier(MPI_COMM_WORLD);
+ double tstop = MPI_Wtime();
+
+ if(data.me == 0) cerr << endl << " Time took for uploading ref_seq : " << tstop - tstart << endl << endl;
+
+// ###############################################
+ 
+ if(data.me == 0) cerr << endl << " Uploading  input reads info..... " << endl << endl; 
+ int nseqs;
+ if(      strcmp(typeFile.substr(0,2).c_str(),"fa") == 0) { data.ftype = false; nseqs = mrSeq->map(narg-num_args,&args[num_args],0,1,0,fileread_RNAseq_HeadSeq_FASTA,&data); }
+ else if( strcmp(typeFile.substr(0,2).c_str(),"fq") == 0) { data.ftype = true;  nseqs = mrSeq->map(narg-num_args,&args[num_args],0,1,0,fileread_RNAseq_HeadSeq_FASTQ,&data); }
+ else {
+    printf("ERROR: query file format wrong! It should be either 'fq' or 'fa' format. \n");
+    MPI_Abort(MPI_COMM_WORLD,1);
+ }
+
+ int *sub_range = (int *)malloc(sizeof(int) * data.nprocs);
+ MPI_Allgather(&data.range, 1, MPI_INT, sub_range, 1, MPI_INT, MPI_COMM_WORLD);
+
+ for(int i=0; i<data.nprocs; i++) {
+//	if(data.range > sub_range[i]) data.range = sub_range[i];
+	if(data.range < sub_range[i]) data.range = sub_range[i];
+ }
+
+ if(data.me == 0) cerr << endl << " input seq length =  " << data.range << endl << endl;
+
+// ############################################################################################
+
+ if(data.me == 0) cerr << endl << " Extracting  read alignment info..... " << endl << endl;
+
+ int nLink = mrLink->map(narg-num_args,&args[num_args],0,1,0,fileread_AlignmentInfo,&data);
+
+ mrLink->collate(NULL);
+ mrLink->reduce(reduce_Link_from_Header,&data);
+
+ mrLink->add(mrSeq);
+ mrLink->collate(NULL);
+
+ uint64_t num_all_PEs = mrLink->reduce(reduce_LinkID_HeadSeq,&data);
+
+// ###########################################################################
+
+
+// mrLink->collate(NULL);
+// mrLink->reduce(reduce_Kmer_Cov_All,&data);
+
+// mrLink->collate(NULL);
+
+// stringstream out_filename;
+// out_filename << "cluster_" << data.me << ".fa";
+// data.outFile.open(out_filename.str().c_str());
+
+// mrLink->reduce(print_Kmer_Cov,&data);
+
+// data.outFile.close();
+
+
+//  mrLink->collate(NULL);
+//  mrLink->reduce(reduce_All_Kmers,&data);
+//  mrLink->collate(NULL);
+ 
+//  stringstream out_filename;
+//  out_filename << "cluster_" << data.me << ".fa";
+//  data.outFile.open(out_filename.str().c_str());
+
+//  mrLink->reduce(print_Kmer_Cov_All,&data);
+
+//  data.outFile.close(); 
+
+// ####################################################################################
+
+// if(data.me == 0) cerr << endl << " Extracting  error kmers..... " << endl << endl;
+
+
+ int QS_range = 43;
+
+// data.prior_prob = (double **) malloc(  data.range*sizeof(double *));
+// for(int i=0; i<data.range; i++) data.prior_prob[i] = (double *) malloc(4*sizeof(double));
+
+// for(int i=0; i<data.range; i++)
+//	for(int j=0; j<4; j++) data.prior_prob[i][j] = 0.0;
+
+
+ data.ATGC1 = (unsigned long long *) malloc(sizeof(unsigned long long)*4);
+ data.ATGC2 = (unsigned long long *) malloc(sizeof(unsigned long long)*4);
+ for(int k=0; k<4; k++) { data.ATGC1[k] = 0; data.ATGC2[k] = 0; }
+
+
+ mrEkmer = mrLink->copy();
+ mrEkmer->collate(NULL);
+ mrEkmer->reduce(reduce_Kmer_Cov_All,&data);
+
+ uint64_t num_all_kmers  = mrEkmer->collate(NULL);
+ uint64_t num_all_ekmers = mrEkmer->reduce(reduce_error_kmers,&data);
+
+ mrBuffer = mrLink->copy();
+ mrBuffer->collate(NULL);
+ mrBuffer->reduce(reduce_extract_kmers_for_error_counts, &data);
+
+ if(data.me == 0) cerr << endl << " Adding error kmers with Read-Kmer pairs..... " << endl << endl;
+ mrBuffer->add(mrEkmer);
+
+ mrBuffer->collate(NULL);
+ mrBuffer->reduce(reduce_error_onAmplicons,&data); 
+
+ if(data.me == 0) cerr << endl << " Error counting with Read-Kmer pairs..... " << endl << endl;
+
+ mrSeq = mrLink->copy(); 
+ mrSeq->add(mrBuffer);
+
+ mrSeq->collate(NULL);
+
+ mrSeq->reduce(reduce_error_matrices_step1,&data);
+
+ mrSeq ->collate(NULL);
+
+ mrSeq->reduce(reduce_error_matrices_step2,&data);
+
+ mrSeq->collate(NULL);
+
+
+
+// ################################################################################
+//
+
+
+ unsigned long long  *atgc_all = (unsigned long long *) malloc( sizeof(unsigned long long)*4 );
+// data.prior_prob = (double *) malloc( sizeof(double)*4 );
+  
+ for(int k=0; k<4; k++) atgc_all[k] = 0;   
+ MPI_Allreduce(data.ATGC1, atgc_all, 4, MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+ for(int k=0; k<4; k++) data.ATGC1[k] = atgc_all[k];
+
+ for(int k=0; k<4; k++) atgc_all[k] = 0;
+ MPI_Allreduce(data.ATGC2, atgc_all, 4, MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+ for(int k=0; k<4; k++) data.ATGC2[k] = atgc_all[k];
+
+// data.prior_prob[1] = (double)atgc_all[0] / (double)(atgc_all[0]+atgc_all[1]) / 2.0;
+// data.prior_prob[0] = 0.5 - data.prior_prob[1];
+// data.prior_prob[2] = data.prior_prob[1];
+// data.prior_prob[3] = data.prior_prob[0];
+
+ free(atgc_all);
+
+
+ data.qs1_count    = (int ***) malloc(  QS_range*sizeof(int **));
+ data.qs2_count    = (int ***) malloc(  QS_range*sizeof(int **));
+
+// data.read1_count = (int ***) malloc(data.range*sizeof(int **));
+// data.read2_count = (int ***) malloc(data.range*sizeof(int **));
+
+ for(int i=0; i<QS_range; i++) {
+    data.qs1_count[i] = (int **) malloc(4*sizeof(int *)); 
+    data.qs2_count[i] = (int **) malloc(4*sizeof(int *));
+
+    for(int j=0; j<4; j++) {
+	data.qs1_count[i][j] = (int *) malloc(4*sizeof(int));
+	data.qs2_count[i][j] = (int *) malloc(4*sizeof(int));
+    }
+ }
+
+// for(int i=0; i<data.range; i++) {
+//    data.read1_count[i] = (int **) malloc(4*sizeof(int *));
+//    data.read2_count[i] = (int **) malloc(4*sizeof(int *));
+
+//    for(int j=0; j<4; j++) {
+//	data.read1_count[i][j] = (int *) malloc(4*sizeof(int));
+//	data.read2_count[i][j] = (int *) malloc(4*sizeof(int));
+//    }
+// }
+
+ for(int i=0; i<QS_range; i++)
+   for(int j=0; j<4; j++)
+      for(int k=0; k<4; k++) {
+	data.qs1_count[i][j][k] = 0;
+	data.qs2_count[i][j][k] = 0;
+      }
+
+
+// for(int i=0; i<data.range; i++)
+//   for(int j=0; j<4; j++)
+//      for(int k=0; k<4; k++) {
+//	data.read1_count[i][j][k] = 0;
+//        data.read2_count[i][j][k] = 0;
+//      }
+
+ mrSeq->reduce(reduce_ntnt_count, &data);
+
+ int *ncount = (int *) malloc(sizeof(int)*4);
+ int *gcount = (int *) malloc(sizeof(int)*4); 
+
+ for(int i=0; i<QS_range; i++)
+   for(int j=0; j<4; j++) {
+
+	for(int k=0; k<4; k++) { ncount[k] = data.qs1_count[i][j][k]; gcount[k] = 0; }
+	MPI_Allreduce(ncount, gcount, 4, MPI_INT, MPI_SUM, MPI_COMM_WORLD); 
+	for(int k=0; k<4; k++) data.qs1_count[i][j][k] = gcount[k];
+
+        for(int k=0; k<4; k++) { ncount[k] = data.qs2_count[i][j][k]; gcount[k] = 0; }
+        MPI_Allreduce(ncount, gcount, 4, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+        for(int k=0; k<4; k++) data.qs2_count[i][j][k] = gcount[k];
+
+ }
+
+
+// for(int i=0; i<data.range; i++)
+//   for(int j=0; j<4; j++) {
+//        for(int k=0; k<4; k++) { ncount[k] = data.read1_count[i][j][k]; gcount[k] = 0; }
+//        MPI_Allreduce(ncount, gcount, 4, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+//        for(int k=0; k<4; k++) data.read1_count[i][j][k] = gcount[k];
+
+//        for(int k=0; k<4; k++) { ncount[k] = data.read2_count[i][j][k]; gcount[k] = 0; }
+//        MPI_Allreduce(ncount, gcount, 4, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+//        for(int k=0; k<4; k++) data.read2_count[i][j][k] = gcount[k];
+// }
+
+ free(ncount);
+ free(gcount);
+
+// ###############################################
+
+/*
+
+  double sigma = 2.0;
+  double sigma2 = pow(sigma, 2);
+
+  int actual_count1[QS_range][4];
+  int actual_count2[QS_range][4];
+  for(int q = 0; q < QS_range; q++)
+      for(int i = 0; i < 4; i++)  { actual_count1[q][i] = 0; actual_count2[q][i] = 0; }
+
+  for(int q = 0; q < QS_range; q++)
+    for(int i = 0; i < 4; i++)
+      for(int j = 0; j < 4; j++) {
+        actual_count1[q][i] += data.qs1_count[q][i][j];
+	actual_count2[q][i] += data.qs2_count[q][i][j];
+      }
+
+  data.qs1_prob    = (double ***) malloc(  QS_range*sizeof(double **));
+  data.qs2_prob    = (double ***) malloc(  QS_range*sizeof(double **)); 
+  for(int i=0; i<QS_range; i++) {
+    data.qs1_prob[i] = (double **) malloc(4*sizeof(double *));
+    data.qs2_prob[i] = (double **) malloc(4*sizeof(double *));
+    for(int j=0; j<4; j++) {
+	data.qs1_prob[i][j] = (double *) malloc(4*sizeof(double));
+	data.qs2_prob[i][j] = (double *) malloc(4*sizeof(double));
+    }
+  }
+
+
+  for(int q = 20; q < QS_range; q++) {
+    for(int i = 0; i < 4; i++) {
+      for(int j = 0; j < 4; j++) {
+        double pnum1 = 0;
+        double pden1 = 0;
+        double pnum2 = 0;
+        double pden2 = 0;
+        for(int qr = 20; qr < QS_range; qr++) {
+          pnum1 += (double)data.qs1_count[qr][i][j] * exp(-pow((double)(qr - q), 2)/(2*sigma2));
+          pden1 += (double)actual_count1[qr][i]     * exp(-pow((double)(qr - q), 2)/(2*sigma2));
+          pnum2 += (double)data.qs2_count[qr][i][j] * exp(-pow((double)(qr - q), 2)/(2*sigma2));
+          pden2 += (double)actual_count2[qr][i]     * exp(-pow((double)(qr - q), 2)/(2*sigma2));
+        }
+        data.qs1_prob[q][i][j] = pnum1 / pden1;
+	data.qs2_prob[q][i][j] = pnum2 / pden2;
+      }
+
+    }
+ }
+*/
+
+// #############################################################################
+//
+
+/*
+ if(data.me == 0) {
+
+    ofstream outFile;
+    stringstream out_filename;
+
+    out_filename.str(""); 
+    out_filename << "Quality1_count.txt";
+    outFile.open(out_filename.str().c_str());
+    for(int i=5; i<QS_range; i++) {
+      outFile << i;
+      for(int j=0; j<4; j++) {
+         for(int k=0; k<4; k++) outFile << "\t" << data.qs1_count[i][j][k];
+      }
+      outFile << endl;
+   }
+    outFile.close();
+
+    out_filename.str("");
+    out_filename << "Quality2_count.txt";
+    outFile.open(out_filename.str().c_str());
+    for(int i=5; i<QS_range; i++) {
+      outFile << i;
+      for(int j=0; j<4; j++) {
+         for(int k=0; k<4; k++) outFile << "\t" << data.qs2_count[i][j][k];
+      }
+      outFile << endl;
+   }
+    outFile.close();
+
+
+    out_filename.str(""); 
+    out_filename << "Quality1_prob.txt";
+    outFile.open(out_filename.str().c_str());
+    for(int i=5; i<QS_range; i++) {
+      outFile << i;
+      for(int j=0; j<4; j++) {
+         for(int k=0; k<4; k++) outFile << "\t" << data.qs1_prob[i][j][k];
+      }
+      outFile << endl;
+   }
+    outFile.close();
+
+    out_filename.str("");
+    out_filename << "Quality2_prob.txt";
+    outFile.open(out_filename.str().c_str());
+    for(int i=5; i<QS_range; i++) {
+      outFile << i;
+      for(int j=0; j<4; j++) {
+         for(int k=0; k<4; k++) outFile << "\t" << data.qs2_prob[i][j][k];
+      }
+      outFile << endl;
+   }
+    outFile.close();
+
+ }
+
+*/
+
+// ############################################################################
+
+
+/*
+  data.read1_prob    = (double ***) malloc( data.range*sizeof(double **));
+  data.read2_prob    = (double ***) malloc( data.range*sizeof(double **));
+  for(int i=0; i<data.range; i++) {
+    data.read1_prob[i] = (double **) malloc(4*sizeof(double *));
+    data.read2_prob[i] = (double **) malloc(4*sizeof(double *));
+    for(int j=0; j<4; j++) {
+	data.read1_prob[i][j] = (double *) malloc(4*sizeof(double));
+	data.read2_prob[i][j] = (double *) malloc(4*sizeof(double));
+    }
+  }
+
+  int read1_count[data.range][4];
+  int read2_count[data.range][4];
+  for(int q = 0; q < data.range; q++)
+      for(int i = 0; i < 4; i++) { read1_count[q][i] = 0; read2_count[q][i] = 0; }
+
+  for(int q = 0; q < data.range; q++)
+    for(int i = 0; i < 4; i++)
+      for(int j = 0; j < 4; j++) {
+        read1_count[q][i] += data.read1_count[q][i][j];
+        read2_count[q][i] += data.read2_count[q][i][j];
+      }
+
+
+  for(int q = 0; q < data.range; q++) {
+    for(int i = 0; i < 4; i++) {
+      for(int j = 0; j < 4; j++) {
+        double pnum1 = 0;
+        double pden1 = 0;
+        double pnum2 = 0;
+        double pden2 = 0;
+
+        for(int qr = 0; qr < data.range; qr++) {
+          pnum1 += (double)data.read1_count[qr][i][j] * exp(-pow((double)(qr - q), 2)/(2*sigma2));
+          pden1 += (double)read1_count[qr][i] * exp(-pow((double)(qr - q), 2)/(2*sigma2));
+
+          pnum2 += (double)data.read2_count[qr][i][j] * exp(-pow((double)(qr - q), 2)/(2*sigma2));
+          pden2 += (double)read2_count[qr][i] * exp(-pow((double)(qr - q), 2)/(2*sigma2));
+        }
+
+        data.read1_prob[q][i][j] = pnum1 / pden1;
+        data.read2_prob[q][i][j] = pnum2 / pden2;
+      }
+
+    }
+ } 
+*/
+
+
+// ###############################################################################
+//
+
+/*
+
+ if(data.me == 0) {
+
+    ofstream outFile;
+    stringstream out_filename;
+    out_filename << "Read1_count.txt";
+    outFile.open(out_filename.str().c_str());
+
+    for(int i=0; i<data.range; i++) {
+      outFile << i;
+      for(int j=0; j<4; j++) {
+         for(int k=0; k<4; k++) outFile << "\t" << data.read1_count[i][j][k];
+      }
+      outFile << endl;
+   }
+    outFile.close();
+
+    out_filename.str("");
+    out_filename << "Read2_count.txt";
+    outFile.open(out_filename.str().c_str());
+
+    for(int i=0; i<data.range; i++) {
+      outFile << i;
+      for(int j=0; j<4; j++) {
+         for(int k=0; k<4; k++) outFile << "\t" << data.read2_count[i][j][k];
+      }
+      outFile << endl;
+   }
+    outFile.close();
+
+    out_filename.str("");
+    out_filename << "Read1_prob.txt";
+    outFile.open(out_filename.str().c_str());
+
+    for(int i=0; i<data.range; i++) {
+      outFile << i;
+      for(int j=0; j<4; j++) {
+         for(int k=0; k<4; k++) outFile << "\t" << data.read1_prob[i][j][k];
+      }
+      outFile << endl;
+   }
+    outFile.close();
+
+    out_filename.str("");
+    out_filename << "Read2_prob.txt";
+    outFile.open(out_filename.str().c_str());
+
+    for(int i=0; i<data.range; i++) {
+      outFile << i;
+      for(int j=0; j<4; j++) {
+         for(int k=0; k<4; k++) outFile << "\t" << data.read2_prob[i][j][k];
+      }
+      outFile << endl;
+   }
+    outFile.close();
+
+}
+
+*/
+
+// ###########################################################################
+//   Print consensus sequences in SAM format
+
+
+
+if(data.me == 0) cerr << endl << endl << "Extracting PE HighDup consensus...  " <<  endl << endl;
+
+ mrBuffer = mrLink->copy();
+ uint64_t num_cfDNAs_input = mrBuffer->collate(NULL);
+ uint64_t num_highdup      = mrBuffer->reduce(reduce_consensus_highDup,&data);
+
+ if(data.me == 0) cerr << endl << endl << "Extracting PE singleton reads....  " <<  endl << endl;
+
+ mrLink->add(mrBuffer);
+ mrLink->collate(NULL);
+ mrLink->reduce(reduce_sort_singleton,NULL);
+
+ mrLink->collate(NULL);
+ uint64_t num_singleton    = mrLink->reduce(reduce_consensus_singleton,&data); 
+
+
+
+//data.error_onFragment = (int *) malloc(sizeof(int)*501);
+//for(int i=0; i<501; i++) data.error_onFragment[i] = 0;
+
+//data.num_fragment = (int *) malloc(sizeof(int)*501);
+//for(int i=0; i<501; i++) data.num_fragment[i] = 0;
+
+ data.eBase1 = (unsigned long long *) malloc( sizeof(unsigned long long)*4 );
+ data.sBase1 = (unsigned long long *) malloc( sizeof(unsigned long long)*4 );
+ data.eBase2 = (unsigned long long *) malloc( sizeof(unsigned long long)*4 );
+ data.sBase2 = (unsigned long long *) malloc( sizeof(unsigned long long)*4 );
+ for(int i=0; i<4; i++) { data.eBase1[i] = 0; data.eBase2[i] = 0; data.sBase1[i] = 0; data.sBase2[i] = 0; }
+
+
+for(data.offside = 1; data.offside <= 24; data.offside++) {
+
+ if(data.me == 0) cerr << endl << endl << "Removing errors on Singleton PE reads for chromosome " << data.offside << endl << endl;
+ 
+  mrSeq->map(mrLink,map_correct_singleton_step1,&data); 
+
+  mrSeq->add(mrEkmer);
+
+  mrSeq->collate(NULL);
+
+  mrSeq->reduce(reduce_correct_single_step2,NULL); 
+
+  mrLink->add(mrSeq);
+
+  mrLink->collate(NULL);
+
+  mrLink->reduce(reduce_correct_single_step3,&data);
+
+}
+
+
+ atgc_all = (unsigned long long *) malloc( sizeof(unsigned long long)*4 );
+
+ for(int i=0; i<4; i++) atgc_all[i] = 0; 
+ MPI_Allreduce(data.eBase1, atgc_all, 4, MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+ for(int i=0; i<4; i++) data.eBase1[i] = atgc_all[i];
+
+ for(int i=0; i<4; i++) atgc_all[i] = 0;
+ MPI_Allreduce(data.eBase2, atgc_all, 4, MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+ for(int i=0; i<4; i++) data.eBase2[i] = atgc_all[i];
+
+ for(int i=0; i<4; i++) atgc_all[i] = 0;
+ MPI_Allreduce(data.sBase1, atgc_all, 4, MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+ for(int i=0; i<4; i++) data.sBase1[i] = atgc_all[i];
+
+ for(int i=0; i<4; i++) atgc_all[i] = 0;
+ MPI_Allreduce(data.sBase2, atgc_all, 4, MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+ for(int i=0; i<4; i++) data.sBase2[i] = atgc_all[i];
+
+ free(atgc_all);
+
+
+
+
+
+// int *error_onFragment = (int *) malloc(sizeof(int)*501);
+// for(int i=0; i<=500; i++) error_onFragment[i] = 0;
+// MPI_Allreduce(data.error_onFragment, error_onFragment, 501, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+
+// int *num_fragment = (int *) malloc(sizeof(int)*501);
+// for(int i=0; i<=500; i++) num_fragment[i] = 0;
+// MPI_Allreduce(data.num_fragment, num_fragment, 501, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+
+
+// if(data.me == 0) {
+//   for(int i=1; i<=500; i++) { 
+//		double ratio = (double)(error_onFragment[i]+1)/(double)(num_fragment[i]+1);	
+//		cerr << i << "\t" << num_fragment[i] << "\t" << error_onFragment[i] << "\t" << ratio << endl; 
+//   }
+// }
+
+// free(error_onFragment);
+// free(num_fragment);
+
+//free(data.error_onFragment);
+//free(data.num_fragment);
+
+ uint64_t num_final_cfDNAs = mrLink->add(mrBuffer);
+
+
+/*
+ if(data.me == 0) cerr << endl << endl << "Extracting PE singleton reads....  " <<  endl << endl; 
+
+ mrBuffer = mrLink->copy();
+ mrBuffer->collate(NULL);
+ mrBuffer->reduce(reduce_consensus_SeqQual_singleton,&data);
+
+// mrSeq = mrLink->copy();
+// mrSeq->collate(NULL);
+// mrSeq->reduce(reduce_All_Kmers,&data);
+// mrSeq->collate(NULL);
+// mrSeq->reduce(reduce_ekmers_from_all,&data);
+// mrEkmer->add(mrSeq);
+
+ mrSeq->map(mrBuffer,map_correct_singleton_step1,&data);
+  
+ mrSeq->add(mrEkmer);
+ delete mrEkmer;
+
+ mrSeq->collate(NULL);
+
+ mrSeq->reduce(reduce_correct_single_step2,NULL);
+
+ mrSeq->add(mrBuffer);
+ delete mrBuffer;
+
+ mrSeq->collate(NULL);
+
+ mrSeq->reduce(reduce_correct_single_step3,&data); 
+
+// stringstream out_filename;
+// out_filename << "cluster_" << data.me << ".fa";
+// data.outFile.open(out_filename.str().c_str());
+// mrSeq->map(mrSeq,map_print_like_correct,&data);
+// data.outFile.close();
+
+ if(data.me == 0) cerr << endl << endl << "Extracting PE consensus...  " <<  endl << endl;
+ mrLink->collate(NULL);
+ mrLink->reduce(reduce_consensus_SeqQual_highDup,&data);
+
+ mrLink->add(mrSeq);
+
+*/
+
+
+
+// ###############################################################################
+//  Base frequency table
+
+
+
+if( !freq_filename.empty()) {
+
+ if(data.me == 0) cerr << endl << endl << "Extracting base frequencies for target region... " << endl << endl;
+
+ if(data.me == 0) {
+
+    ofstream statFile;
+
+    std::size_t loc = freq_filename.find(".txt.");
+    string stat_filename = "Stats_BaseCalls.txt.";
+    stat_filename.append(freq_filename,loc+5, freq_filename.length()-loc+5);    
+
+    statFile.open(stat_filename.c_str());
+
+    statFile << "no all PE reads = "    << num_all_PEs      << endl;
+    statFile << "no. total k-mers = "   << num_all_kmers    << endl;
+    statFile << "no. error k-mers = "   << num_all_ekmers   << endl;
+    statFile << "no cfDNAs = "          << num_cfDNAs_input << endl;
+    statFile << "no cfDNAs highdup = "  << num_highdup      << endl;
+    statFile << "no cfDNAs single = "   << num_singleton    << endl;
+    statFile << "no cfDNAs final = "    << num_final_cfDNAs << endl;
+
+    int e_ga1 = 0; 
+    int e_ga2 = 0;
+    for(int k=20; k<QS_range; k++) { e_ga1 += data.qs1_count[k][0][1]; e_ga2 += data.qs2_count[k][0][1]; }
+
+    int e_gt1 = 0;
+    int e_gt2 = 0;
+    for(int k=20; k<QS_range; k++) { e_gt1 += data.qs1_count[k][0][2]; e_gt2 += data.qs2_count[k][0][2]; }
+
+    int e_gc1 = 0;
+    int e_gc2 = 0;
+    for(int k=20; k<QS_range; k++) { e_gc1 += data.qs1_count[k][0][3]; e_gc2 += data.qs2_count[k][0][3]; }
+
+
+    int e_ag1 = 0;
+    int e_ag2 = 0;
+    for(int k=20; k<QS_range; k++) { e_ag1 += data.qs1_count[k][1][0]; e_ag2 += data.qs2_count[k][1][0]; }
+
+    int e_at1 = 0;
+    int e_at2 = 0;
+    for(int k=20; k<QS_range; k++) { e_at1 += data.qs1_count[k][1][2]; e_at2 += data.qs2_count[k][1][2]; }
+
+    int e_ac1 = 0;
+    int e_ac2 = 0;
+    for(int k=20; k<QS_range; k++) { e_ac1 += data.qs1_count[k][1][3]; e_ac2 += data.qs2_count[k][1][3]; }
+
+
+
+    int e_tg1 = 0;
+    int e_tg2 = 0;
+    for(int k=20; k<QS_range; k++) { e_tg1 += data.qs1_count[k][2][0]; e_tg2 += data.qs2_count[k][2][0]; }
+
+    int e_ta1 = 0;
+    int e_ta2 = 0;
+    for(int k=20; k<QS_range; k++) { e_ta1 += data.qs1_count[k][2][1]; e_ta2 += data.qs2_count[k][2][1]; }
+
+    int e_tc1 = 0;
+    int e_tc2 = 0;
+    for(int k=20; k<QS_range; k++) { e_tc1 += data.qs1_count[k][2][3]; e_tc2 += data.qs2_count[k][2][3]; }
+
+
+    int e_cg1 = 0;
+    int e_cg2 = 0;
+    for(int k=20; k<QS_range; k++) { e_cg1 += data.qs1_count[k][3][0]; e_cg2 += data.qs2_count[k][3][0]; }
+
+    int e_ca1 = 0;
+    int e_ca2 = 0;
+    for(int k=20; k<QS_range; k++) { e_ca1 += data.qs1_count[k][3][1]; e_ca2 += data.qs2_count[k][3][1]; }
+
+    int e_ct1 = 0;
+    int e_ct2 = 0;
+    for(int k=20; k<QS_range; k++) { e_ct1 += data.qs1_count[k][3][2]; e_ct2 += data.qs2_count[k][3][2]; }
+
+
+    unsigned long long noBase_1 = 0; 
+    unsigned long long noBase_2 = 0;
+    for(int k=0; k<4; k++) { noBase_1 += data.ATGC1[k]; noBase_2 += data.ATGC2[k]; }
+
+    statFile << endl;
+    statFile << "G>A " << (double)e_ga1/(double)noBase_1 << "\t" << (double)e_ga2/(double)noBase_2 << endl;
+    statFile << "G>T " << (double)e_gt1/(double)noBase_1 << "\t" << (double)e_gt2/(double)noBase_2 << endl;
+    statFile << "G>C " << (double)e_gc1/(double)noBase_1 << "\t" << (double)e_gc2/(double)noBase_2 << endl;
+
+    statFile << "A>G " << (double)e_ag1/(double)noBase_1 << "\t" << (double)e_ag2/(double)noBase_2 << endl;
+    statFile << "A>T " << (double)e_at1/(double)noBase_1 << "\t" << (double)e_at2/(double)noBase_2 << endl;
+    statFile << "A>C " << (double)e_ac1/(double)noBase_1 << "\t" << (double)e_ac2/(double)noBase_2 << endl;
+
+    statFile << "T>G " << (double)e_tg1/(double)noBase_1 << "\t" << (double)e_tg2/(double)noBase_2 << endl;
+    statFile << "T>A " << (double)e_ta1/(double)noBase_1 << "\t" << (double)e_ta2/(double)noBase_2 << endl;
+    statFile << "T>C " << (double)e_tc1/(double)noBase_1 << "\t" << (double)e_tc2/(double)noBase_2 << endl;
+
+    statFile << "C>G " << (double)e_cg1/(double)noBase_1 << "\t" << (double)e_cg2/(double)noBase_2 << endl;
+    statFile << "C>A " << (double)e_ca1/(double)noBase_1 << "\t" << (double)e_ca2/(double)noBase_2 << endl;
+    statFile << "C>T " << (double)e_ct1/(double)noBase_1 << "\t" << (double)e_ct2/(double)noBase_2 << endl;
+
+    statFile << endl;
+    statFile << "# Guanine  on high_dup reads (+/-):\t" << data.ATGC1[0] << "\t" << data.ATGC2[0] << endl;
+    statFile << "# Adenine  on high_dup reads (+/-):\t" << data.ATGC1[1] << "\t" << data.ATGC2[1] << endl;
+    statFile << "# Thymine  on high_dup reads (+/-):\t" << data.ATGC1[2] << "\t" << data.ATGC2[2] << endl;
+    statFile << "# Cytosine on high_dup reads (+/-):\t" << data.ATGC1[3] << "\t" << data.ATGC2[3] << endl;
+
+    unsigned long long GC = data.ATGC1[0] + data.ATGC1[3];
+    unsigned long long tB = 0; for(int k=0; k<4; k++) tB += data.ATGC1[k];
+    statFile << endl;
+    statFile << "GC content on high_dup reads (+) %:\t" << (double)GC/(double)tB << endl;
+
+    GC = data.ATGC2[0] + data.ATGC2[3];
+    tB = 0; for(int k=0; k<4; k++) tB += data.ATGC2[k];
+    statFile << "GC content on high_dup reads (-) %:\t" << (double)GC/(double)tB << endl;
+
+    statFile << endl;
+    statFile << "# Guanine  Error removed on singletons (+/-):\t" << data.eBase1[0] << "\t" << data.eBase2[0] << endl;
+    statFile << "# Adenine  Error removed on singletons (+/-):\t" << data.eBase1[1] << "\t" << data.eBase2[1] << endl;
+    statFile << "# Thymine  Error removed on singletons (+/-):\t" << data.eBase1[2] << "\t" << data.eBase2[2] << endl;
+    statFile << "# Cytosine Error removed on singletons (+/-):\t" << data.eBase1[3] << "\t" << data.eBase2[3] << endl;
+
+    statFile << endl;
+    statFile << "# Guanine  bases on singletons (+/-):\t" << data.sBase1[0] << "\t" << data.sBase2[0] << endl;
+    statFile << "# Adenine  bases on singletons (+/-):\t" << data.sBase1[1] << "\t" << data.sBase2[1] << endl;
+    statFile << "# Thymine  bases on singletons (+/-):\t" << data.sBase1[2] << "\t" << data.sBase2[2] << endl;
+    statFile << "# Cytosine bases on singletons (+/-):\t" << data.sBase1[3] << "\t" << data.sBase2[3] << endl;
+
+    unsigned long long sB_1 = 0; unsigned long long sB_2 = 0; for(int k=0; k<4; k++) { sB_1 += data.sBase1[k]; sB_2 += data.sBase2[k]; }
+
+    statFile << endl;
+    statFile << "% error(Guanine) removed on singletons (+/-):\t" << (double)data.eBase1[0]/(double)sB_1*100.0 << "\t" << (double)data.eBase2[0]/(double)sB_2*100.0 << endl;
+    statFile << "% error(Adenine) removed on singletons (+/-):\t" << (double)data.eBase1[1]/(double)sB_1*100.0 << "\t" << (double)data.eBase2[1]/(double)sB_2*100.0 << endl;
+    statFile << "% error(Thymine) removed on singletons (+/-):\t" << (double)data.eBase1[2]/(double)sB_1*100.0 << "\t" << (double)data.eBase2[2]/(double)sB_2*100.0 << endl;
+    statFile << "% error(Cytosine) removed on singletons (+/-):\t" << (double)data.eBase1[3]/(double)sB_1*100.0 << "\t" << (double)data.eBase2[3]/(double)sB_2*100.0 << endl;
+
+    statFile.close();
+
+ }
+
+ ofstream freqFile;
+ if(data.me == 0) {
+    freqFile.open(freq_filename.c_str());
+
+    freqFile << "Chr" << "\t" << "Loc" << "\t" << "Depth" << "\t" << "Ref";
+    freqFile << "\t" << "ref_freq_+" << "\t" << "ref_freq_-";
+    freqFile << "\t" << "G+" << "\t" << "G-";
+    freqFile << "\t" << "A+" << "\t" << "A-";
+    freqFile << "\t" << "T+" << "\t" << "T-";
+    freqFile << "\t" << "C+" << "\t" << "C-";
+    freqFile << endl;
+ }
+
+int print_interval = 1000;
+
+for(data.offside = 1; data.offside <= 24; data.offside++) {
+
+   if(data.me == 0) cerr << endl << "Printing Base Frequency table for chromsome " << data.offside << endl << endl;
+ 
+   mrLink->map(mrLink, map_Base_Frequency, &data);
+   mrLink->collate(NULL);
+
+   int size_target = 0;
+   for(int i=0; i<data.loc_vector; i++) {
+	if(data._target_loc[i].chr == data.offside) size_target += (int)(data._target_loc[i].loc2-data._target_loc[i].loc1 + 1);
+   }
+
+   TableLoc _table_loc;
+   unsigned long long nloc = 0;
+   for(int i=0; i<data.loc_vector; i++) {
+    if(data._target_loc[i].chr == data.offside) {
+      for(unsigned long long j=data._target_loc[i].loc1; j<= data._target_loc[i].loc2; j++)  {
+          unsigned long long point_target = (unsigned long long)data._target_loc[i].chr * (unsigned long long)1e11 + j;
+          _table_loc._loc_freq_table[ point_target ] = nloc;
+          nloc++;
+      }
+    }
+   }
+
+
+  _table_loc.table_positive = (unsigned long long *)malloc(sizeof(unsigned long long)*(nloc*4));
+  _table_loc.table_negative = (unsigned long long *)malloc(sizeof(unsigned long long)*(nloc*4));
+  for(unsigned long long i=0; i<(nloc*4); i++) { _table_loc.table_positive[i] = 0; _table_loc.table_negative[i] = 0; }
+
+  mrLink->reduce(reduce_summation_base_frequency, &_table_loc);
+
+ unsigned long long *out_point_positive;
+ unsigned long long *out_point_negative;
+
+ if(data.me == 0) {
+  out_point_positive = (unsigned long long *)malloc(sizeof(unsigned long long)*(nloc*4));
+  out_point_negative = (unsigned long long *)malloc(sizeof(unsigned long long)*(nloc*4));
+
+  for(unsigned long long i=0; i<(nloc*4); i++) { out_point_positive[i] = 0; out_point_negative[i] = 0; }
+ }
+
+ if(data.me == 0) cerr << endl << endl << "Reducing point substitution frequencies for target regions!!" << endl << endl;
+
+ MPI_Reduce(_table_loc.table_positive, out_point_positive, nloc*4, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+ MPI_Reduce(_table_loc.table_negative, out_point_negative, nloc*4, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+
+ free(_table_loc.table_positive);
+ free(_table_loc.table_negative);
+
+/*
+ if(data.me == 0) {
+
+    for(int i=0; i<data.loc_vector; i++) {
+      for(unsigned long long j=data._target_loc[i].loc1; j<= data._target_loc[i].loc2; j++)  {
+
+        unsigned long long point_target = (unsigned long long)data._target_loc[i].chr * (unsigned long long)1e11 + j;
+        unsigned long long point        = _table_loc._loc_freq_table[ point_target ];
+
+        char ref_base = data.reference_sequence[ data._target_loc[i].chr ].at(j-1);
+        int  ref_int  = get_int_from_base( ref_base );
+
+ 	int depth = 0;
+	depth += (out_point_positive[ point*4 + ref_int ] + out_point_negative[ point*4 + ref_int ]);
+	for(int k=0; k<4; k++) {
+                if(k != ref_int) {
+			depth += out_point_positive[ point*4 + k ];
+                	depth += out_point_negative[ point*4 + k ];
+		}
+        }
+
+        if(depth > 0) {
+          freqFile << data._target_loc[i].chr << "\t" << j << "\t" << depth << "\t" << ref_base;
+	  freqFile << "\t" << out_point_positive[ point*4 + ref_int ] << "\t" << out_point_negative[ point*4 + ref_int ];
+
+          for(int k=0; k<4; k++) {
+                if(k != ref_int) freqFile << "\t" << out_point_positive[ point*4 + k ];
+                else             freqFile << "\t" << 0;
+
+		if(k != ref_int) freqFile << "\t" << out_point_negative[ point*4 + k ];
+                else             freqFile << "\t" << 0;
+          }
+
+          freqFile << endl;
+        }
+
+      }
+    }
+
+    free(out_point_positive);
+    free(out_point_negative);
+
+ }
+*/
+
+}
+
+ if(data.me == 0) freqFile.close();
+
+} else {
+
+
+ if(data.me == 0) cerr << endl << endl << "Printing result  " <<  endl;
+
+ stringstream out_filename;
+ out_filename << "cluster_" << data.me << ".fa";
+ data.outFile.open(out_filename.str().c_str()); 
+
+ if(data.me == 0) {
+
+   for(int i=1; i<=22; i++) 
+	data.outFile << "@SQ" << "\t" << "SN:" << i << "\t" << "LN:" << data.reference_sequence[i].length() << endl; 
+
+   data.outFile << "@SQ" << "\t" << "SN:X"  << "\t" << "LN:" << data.reference_sequence[23].length() << endl;
+   data.outFile << "@SQ" << "\t" << "SN:Y"  << "\t" << "LN:" << data.reference_sequence[24].length() << endl;
+   data.outFile << "@SQ" << "\t" << "SN:MT" << "\t" << "LN:" << data.reference_sequence[25].length() << endl;
+
+   data.outFile << "@RG" << "\t" << "ID:AA1" << "\t" << "SM:" << SampleName.c_str() << "\t" << "PL:ILLUMINA" << "\t" << "LB:ECPipeline" << "\t" << "PU:S2" << endl; 
+   data.outFile << "@PG" << "\t" << "ID:ECPipeline" << "\t" <<  "PN:CEP" << "\t" <<  "VN:0.0.1" << "\t" << "CL:PCRError" << endl;
+
+ }
+
+ if(data.me == 0) cerr  << "  PE consensus reads...  "  << endl;
+ mrLink->map(mrLink, map_print2samformat_removeSoftClip, &data);
+
+ data.outFile.close();
+
+}
+
+
+
+// ###########################################################################
+
+
+ for(int i=0; i<QS_range; i++) {
+   for(int j=0; j<4; j++) {
+		free(data.qs1_count[i][j]);
+   		free(data.qs2_count[i][j]);
+//   		free(data.qs1_prob[i][j]);
+//   		free(data.qs2_prob[i][j]); 
+   }
+ 
+   free(data.qs1_count[i]);
+   free(data.qs2_count[i]);
+//   free(data.qs1_prob[i]);
+//   free(data.qs2_prob[i]); 
+ }
+ free(data.qs1_count);
+ free(data.qs2_count);
+// free(data.qs1_prob);
+// free(data.qs2_prob);
+
+
+
+/*
+ for(int i=0; i<data.range; i++) {
+   for(int j=0; j<4; j++) {
+	free(data.read1_count[i][j]);
+        free(data.read2_count[i][j]);
+        free(data.read1_prob[i][j]);
+        free(data.read2_prob[i][j]); 
+   }
+
+   free(data.read1_count[i]);
+   free(data.read2_count[i]);
+   free(data.read1_prob[i]);
+   free(data.read2_prob[i]); 
+ }
+ free(data.read1_count);
+ free(data.read2_count);
+ free(data.read1_prob);
+ free(data.read2_prob);
+*/
+
+// free(data.prior_prob); 
+
+
+free(data.eBase1); free(data.eBase2);
+free(data.sBase1); free(data.sBase2);
+free(data.ATGC1);  free(data.ATGC2);
+
+
+// ###########################################################################
+
+ MPI_Barrier(MPI_COMM_WORLD);
+
+ delete mrLink;
+ delete mrSeq;
+ delete mrEkmer;
+ delete mrBuffer;
+
+ MPI_Finalize();
+ exit(0);
+
+}
+

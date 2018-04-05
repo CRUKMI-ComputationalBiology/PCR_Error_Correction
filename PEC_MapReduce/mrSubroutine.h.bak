@@ -1,0 +1,109 @@
+#include "mpi.h"
+
+#include "stdio.h"
+#include "stdlib.h"
+#include "string.h"
+#include "sys/stat.h"
+
+#define __STDC_LIMIT_MACROS
+#include "mapreduce.h"
+#include "keyvalue.h"
+#include "blockmacros.h"
+
+#include "fstream"
+#include "iostream"
+#include "sstream"
+
+#include "vector"
+#include "map"
+#include "set"
+#include "algorithm"
+#include "time.h"
+#include "math.h"
+
+#include "Fasta_reader.hpp"
+#include "sequenceUtil.hpp"
+
+#include "ssw_cpp.h"
+
+using namespace MAPREDUCE_NS;
+using namespace std;
+
+void fileread_RNAseq_HeadSeq(int itask, char *fname, KeyValue *kv, void *ptr);
+
+void fileread_AlignmentInfo(int itask, char *fname, KeyValue *kv, void *ptr);
+void reduce_Link_from_Header(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+
+void fileread_AlignmentInfo_New(int itask, char *fname, KeyValue *kv, void *ptr);
+void reduce_Link_from_Header_New(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+
+int parse_cigar_softclipping(char *s);
+
+void reduce_LinkID_HeadSeq(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+
+void reduce_LinkID_HeadSeq_New(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+
+
+void reduce_assemble_statistics(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+void Get_DirectionStrand(string head_seq, int *PE_direction, int *Strand, string ref_seq, int data_range);
+
+void reduce_reference_consensus_statistics(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+void print_unCleaned_reads(char *multivalue, int nvalues, int *valuebytes, int data_range, std::ofstream &outFile_R1, std::ofstream &outFile_R2);
+
+void get_consensus(StripedSmithWaterman::Alignment alignment, string seq, int *num_consensus);
+string get_cleanRead(const char *consen_seq, StripedSmithWaterman::Alignment alignment, string seq, int *len);
+void print_reads(std::ofstream &outFile,StripedSmithWaterman::Alignment alignment, string seq, int *num_consensus);
+
+void reduce_errorCorrection_reads(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+void reduce_reference_errorCorrection_reads(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+
+
+int check_num_match(StripedSmithWaterman::Alignment alignment);
+void reduce_print_correctedReads(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+
+
+
+void reduce_print_interChrRearrangement(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+void reduce_overlapping(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+
+
+void reduce_statistics(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+
+
+int check_deletion_consensus(int *num_consensus1, int *num_consensus2, int len_consensus, int num_sp1, int num_sp2);
+int check_deletion_consensus_single(int *num_consensus, int len_consensus, int num_sp);
+string check_consensus_sequence(const char *ref_seq, int *check_error, int *num_consensus1, int *num_consensus2, int len_consensus, int num_sp1, int num_sp2, int * loc_consensus);
+string check_consensus_seq_single(const char *ref_seq, int *check_error, int *num_consensus, int len_consensus, int num_sp, int *loc_consensus);
+
+void check_base_contrast(int *base_contrast, int *depth, const char *ref_seq, int *num_consensus1, int *num_consensus2, int len_consensus, int num_sp1, int num_sp2, int * loc_consensus);
+void reduce_base_contrast(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+
+
+void reduce_TargetRegion(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+void reduce_onTarget_Exon(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+
+void reduce_TargetRegion_Statistics(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr);
+
+//struct  CigarOp {
+//    char op;   //!< CIGAR operation type (MIDNSHPX=)
+//    int size; //!< CIGAR operation length (number of bases)
+//    static int parse(const char* s,vector<CigarOp>& v)
+//        {
+//        char* p=(char*)(s);
+//        while(*p!=0)
+//            {
+//            char* endptr;
+//            CigarOp c;
+//            c.op = *p;
+//            if(!isalpha(c.op)) return -1;
+//            ++p;
+//            if(!isdigit(*p))   return -1;
+//            c.size =strtol(p,&endptr,10);
+//            if(c.size<=0)      return -1;
+//            v.push_back(c);
+//            p=endptr;
+//            }
+//        return 0;
+//        }
+//};
+

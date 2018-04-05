@@ -1,0 +1,526 @@
+
+#include "mpi.h"
+#include "zlib.h"
+
+#include "stdio.h"
+#include "stdlib.h"
+#include "string.h"
+#include "sys/stat.h"
+
+#define __STDC_LIMIT_MACROS
+#include "mapreduce.h"
+#include "keyvalue.h"
+#include "blockmacros.h"
+#include "typedefs.h"
+
+#include "fstream"
+#include "iostream"
+#include "sstream"
+
+#include "vector"
+#include "map"
+#include "set"
+#include "algorithm"
+#include "time.h"
+#include "math.h"
+
+#include "Fasta_reader.hpp"
+#include "sequenceUtil.hpp"
+
+#include "IRKE.hpp"
+#include "KmerCounter.hpp"
+#include "stacktrace.hpp"
+#include "argProcessor.hpp"
+
+#include "mrSubroutine.h"
+
+using namespace MAPREDUCE_NS;
+using namespace std;
+
+void Execute(const char * command) {
+    int ret = system(command);
+    if (ret != 0) {
+        cout << "COMMAND: " << command << endl;
+        cout << "Died with exit code " << ret << endl;
+        cout << "Exiting." << endl;
+        exit(-1);
+    }
+}
+
+int main(int narg, char **args)
+{
+  MPI_Init(&narg,&args);
+
+  Data data;
+
+  MPI_Comm_rank(MPI_COMM_WORLD,&data.me);
+  MPI_Comm_size(MPI_COMM_WORLD,&data.nprocs);
+
+  data.kmer_length = 25;
+  data.error_rate = 0.001;
+  data.depth = 6;
+  data.chromosome = 1;
+
+  int page_size = 128;
+  data.mismatch = 0;
+  data.MAQ = 15;
+
+  string fname_read1, fname_read2, typeFile, fname_ref;
+
+  int num_args = 1;
+  try {
+       ArgProcessor in_args(narg, args);
+	
+       if (in_args.isArgSet("--K")) {
+            data.kmer_length = in_args.getIntVal("--K");
+            num_args += 2;
+            if(data.me==0) cerr << "Kmer length set to: " << data.kmer_length << endl;
+       }
+
+       if(in_args.isArgSet("--PageSize")) {
+            page_size = in_args.getIntVal("--PageSize");
+            num_args += 2;
+            if(data.me==0) cerr << "Page size for map reduce object set to: " << page_size << endl;
+       }
+
+       if(in_args.isArgSet("--MAQ")) {
+            data.MAQ = in_args.getIntVal("--MAQ");
+            num_args += 2;
+            if(data.me==0) cerr << "Mapping Quality set to: " << data.MAQ << endl;
+       } 
+
+       if(in_args.isArgSet("--OVERLAP")) {
+            data.OVERLAP = in_args.getIntVal("--OVERLAP");
+            num_args += 2;
+            if(data.me==0) cerr << "Seq overlapping set to: " << data.OVERLAP << endl;
+       }
+
+       if(in_args.isArgSet("--Target")) {
+            data.filename = in_args.getStringVal("--Target");
+            num_args += 2;
+            if(data.me==0) cerr << "Target Region file was given as: " << data.filename << endl;
+       } 
+
+       if(in_args.isArgSet("--fnameR1")) {
+            fname_read1 = in_args.getStringVal("--fnameR1");
+            num_args += 2;
+            if(data.me==0) cerr << "filename for error corrected reads1 was given as: " << fname_read1 << endl;
+       }
+
+       if(in_args.isArgSet("--fnameR2")) {
+            fname_read2 = in_args.getStringVal("--fnameR2");
+            num_args += 2;
+            if(data.me==0) cerr << "filename for error corrected reads2 was given as: " << fname_read2 << endl;
+       }  
+
+       if(in_args.isArgSet("--Ref")) {
+            fname_ref = in_args.getStringVal("--Ref");
+            num_args += 2;
+            if(data.me==0) cerr << "filename for HG Reference was given as: " << fname_ref << endl;
+       }
+
+       if(in_args.isArgSet("--type")) {
+            typeFile = in_args.getStringVal("--type");
+            num_args += 2;
+ 
+
+       if(in_args.isArgSet("--ErrorAllow")) {
+            data.side = in_args.getIntVal("--ErrorAllow");
+            num_args += 2;
+            if(data.me==0) cerr << "Error Allowance for Chi-SQ: " << data.side << endl;
+       }
+
+       if(in_args.isArgSet("--Depth_allow")) {
+            data.depth = in_args.getIntVal("--Depth_allow");
+            num_args += 2;
+            if(data.me==0) cerr << "Depth allowed: " << data.depth << endl;
+       }
+
+       if(in_args.isArgSet("--AF_allow")) {
+            data.error_rate = in_args.getFloatVal("--AF_allow");
+            num_args += 2;
+            if(data.me==0) cerr << "AF allowed: " << data.error_rate << endl;
+       }
+
+       if(in_args.isArgSet("--Chromo")) {
+            data.chromosome = in_args.getIntVal("--Chromo");
+            num_args += 2;
+            if(data.me==0) cerr << "Chromosome : " << data.chromosome << endl;
+       }
+
+      }
+
+  }
+
+  catch(exception& e) {
+        cerr << "error: " << e.what() << "\n";
+        return 1;
+  }
+
+// ################################################
+//
+
+ data.MAX_RECURSION = 1;
+ data.MIN_SEED_ENTROPY = 1.5;
+ data.MIN_SEED_COVERAGE = 1;
+
+ data.DS = false;
+
+ data.PACMAN = false;
+ data.CRAWL = false;
+ data.crawl_length = 1;
+ data.min_any_entropy = 0.4;
+
+ data.prune_error_kmers = true;
+ data.min_ratio_non_error = 0.05f;
+ data.min_kmer_count = 1;
+
+ data.MIN_CONNECTIVITY_RATIO = 0.0;
+ data.MIN_ASSEMBLY_LENGTH = 151;
+ data.MIN_ASSEMBLY_COVERAGE = 1;
+
+
+  MapReduce *mrLink = new MapReduce(MPI_COMM_WORLD);
+  mrLink->memsize = page_size;
+  mrLink->verbosity = 1;
+  mrLink->timer = 1;
+
+  MapReduce *mrSeq = new MapReduce(MPI_COMM_WORLD);
+  mrSeq->memsize = page_size;
+  mrSeq->verbosity = 1;
+  mrSeq->timer = 1;
+
+  MapReduce *mrBuffer = new MapReduce(MPI_COMM_WORLD);
+  mrBuffer->memsize = page_size;
+  mrBuffer->verbosity = 1;
+  mrBuffer->timer = 1;
+
+//################################################
+//
+
+ data.range = 151;
+ data.flank = 200;
+
+ data.On_Alignment = false;
+ data.On_Assemble = true;
+
+ data.On_Target = true;  // OnTarget or OffTarget harvesting switch
+
+ data.On_smallCluster = true;
+
+ data.On_Clean = true;  // Switch for error cleaning on input reads
+
+ bool On_Error_Clean = false;  // Error Cleaning switch
+ bool On_Clustering = true;  // Clustering switch
+
+// ##############################################
+
+while( true ) {
+
+  int loc_vector = 0;
+
+  FILE* FS;
+  FS = fopen(data.filename.c_str(), "r");
+
+  while (!feof(FS)) {
+    char temp_string[300];
+    fgets(temp_string, 300, FS);
+
+    char dummy[5];
+//    char gene[15];
+    ExonLoc _loc_info;
+
+//    int n = sscanf(temp_string, "%s %llu %llu %s", dummy, &_loc_info.loc1, &_loc_info.loc2, gene);
+//    if(n < 4) break;
+    int n = sscanf(temp_string, "%s %llu %llu", dummy, &_loc_info.loc1, &_loc_info.loc2);
+    if(n < 3) break;
+
+    _loc_info.chr = 0;
+    if(      strcmp(dummy, "chr1") == 0) _loc_info.chr = 1;
+    else if( strcmp(dummy, "chr2") == 0) _loc_info.chr = 2;
+    else if( strcmp(dummy, "chr3") == 0) _loc_info.chr = 3;
+    else if( strcmp(dummy, "chr4") == 0) _loc_info.chr = 4;
+    else if( strcmp(dummy, "chr5") == 0) _loc_info.chr = 5;
+    else if( strcmp(dummy, "chr6") == 0) _loc_info.chr = 6;
+    else if( strcmp(dummy, "chr7") == 0) _loc_info.chr = 7;
+    else if( strcmp(dummy, "chr8") == 0) _loc_info.chr = 8;
+    else if( strcmp(dummy, "chr9") == 0) _loc_info.chr = 9;
+    else if( strcmp(dummy,"chr10") == 0) _loc_info.chr = 10;
+    else if( strcmp(dummy,"chr11") == 0) _loc_info.chr = 11;
+    else if( strcmp(dummy,"chr12") == 0) _loc_info.chr = 12;
+    else if( strcmp(dummy,"chr13") == 0) _loc_info.chr = 13;
+    else if( strcmp(dummy,"chr14") == 0) _loc_info.chr = 14;
+    else if( strcmp(dummy,"chr15") == 0) _loc_info.chr = 15;
+    else if( strcmp(dummy,"chr16") == 0) _loc_info.chr = 16;
+    else if( strcmp(dummy,"chr17") == 0) _loc_info.chr = 17;
+    else if( strcmp(dummy,"chr18") == 0) _loc_info.chr = 18;
+    else if( strcmp(dummy,"chr19") == 0) _loc_info.chr = 19;
+    else if( strcmp(dummy,"chr20") == 0) _loc_info.chr = 20;
+    else if( strcmp(dummy,"chr21") == 0) _loc_info.chr = 21;
+    else if( strcmp(dummy,"chr22") == 0) _loc_info.chr = 22;
+    else if( strcmp(dummy, "chrX") == 0) _loc_info.chr = 23;
+    else if( strcmp(dummy, "chrY") == 0) _loc_info.chr = 24;
+//    else if( strcmp(dummy, "chrM") == 0) _loc_info.chr = 25;
+
+    if( (_loc_info.chr >= 1) && (_loc_info.chr <= 24) ) {
+//        string gname(gene);
+//        gname = remove_whitespace(gname);
+//        data._target_gene.push_back(gname);
+
+	_loc_info.size = _loc_info.loc2 - _loc_info.loc1 + 1;
+	_loc_info.af  = (int *) malloc( sizeof(int) * _loc_info.size );	
+
+        data._target_loc.push_back(_loc_info);
+
+        loc_vector++;
+    }
+  }
+
+  fclose(FS);
+  break;
+}
+
+ int dn = 1;
+ data.reference_sequence.reserve(26);
+ Fasta_reader fasta_reader(fname_ref);
+ while (true) {
+        Fasta_entry fe = fasta_reader.getNext();
+        string seq = fe.get_sequence();
+        string header = fe.get_header();
+        if (seq == "") break;
+
+        std::size_t pos = header.find_first_of(" ");
+        int chr;
+
+        if( strcmp(header.substr(0,pos).c_str(), "1") == 0) chr = 1;
+        else if( strcmp(header.substr(0,pos).c_str(), "2") == 0) chr = 2;
+        else if( strcmp(header.substr(0,pos).c_str(), "3") == 0) chr = 3;
+        else if( strcmp(header.substr(0,pos).c_str(), "4") == 0) chr = 4;
+        else if( strcmp(header.substr(0,pos).c_str(), "5") == 0) chr = 5;
+        else if( strcmp(header.substr(0,pos).c_str(), "6") == 0) chr = 6;
+        else if( strcmp(header.substr(0,pos).c_str(), "7") == 0) chr = 7;
+        else if( strcmp(header.substr(0,pos).c_str(), "8") == 0) chr = 8;
+        else if( strcmp(header.substr(0,pos).c_str(), "9") == 0) chr = 9;
+        else if( strcmp(header.substr(0,pos).c_str(),"10") == 0) chr = 10;
+        else if( strcmp(header.substr(0,pos).c_str(),"11") == 0) chr = 11;
+        else if( strcmp(header.substr(0,pos).c_str(),"12") == 0) chr = 12;
+        else if( strcmp(header.substr(0,pos).c_str(),"13") == 0) chr = 13;
+        else if( strcmp(header.substr(0,pos).c_str(),"14") == 0) chr = 14;
+        else if( strcmp(header.substr(0,pos).c_str(),"15") == 0) chr = 15;
+        else if( strcmp(header.substr(0,pos).c_str(),"16") == 0) chr = 16;
+        else if( strcmp(header.substr(0,pos).c_str(),"17") == 0) chr = 17;
+        else if( strcmp(header.substr(0,pos).c_str(),"18") == 0) chr = 18;
+        else if( strcmp(header.substr(0,pos).c_str(),"19") == 0) chr = 19;
+        else if( strcmp(header.substr(0,pos).c_str(),"20") == 0) chr = 20;
+        else if( strcmp(header.substr(0,pos).c_str(),"21") == 0) chr = 21;
+        else if( strcmp(header.substr(0,pos).c_str(),"22") == 0) chr = 22;
+        else if( strcmp(header.substr(0,pos).c_str(), "X") == 0) chr = 23;
+        else if( strcmp(header.substr(0,pos).c_str(), "Y") == 0) chr = 24;
+
+        if( (chr>=1) && (chr <= 24) ) {
+            if(dn == chr) {
+                if(data.me == 0) cerr << dn << " " << chr << " " << header.c_str() << endl;
+                data.reference_sequence.push_back(seq);
+                dn++;
+            }
+       }
+
+//	if(chr == 1) break;
+  }
+
+
+// ###############################################
+
+ if(data.me == 0) cerr << endl << " Uploading  input reads info..... " << endl << endl; 
+ int nseqs;
+ if(      strcmp(typeFile.substr(0,2).c_str(),"fa") == 0) { data.ftype = false; nseqs = mrSeq->map(narg-num_args,&args[num_args],0,1,0,fileread_RNAseq_HeadSeq_FASTA,&data); }
+ else if( strcmp(typeFile.substr(0,2).c_str(),"fq") == 0) { data.ftype = true;  nseqs = mrSeq->map(narg-num_args,&args[num_args],0,1,0,fileread_RNAseq_HeadSeq_FASTQ,&data); }
+ else {
+    printf("ERROR: query file format wrong! It should be either 'fq' or 'fa' format. \n");
+    MPI_Abort(MPI_COMM_WORLD,1);
+ }
+
+ int *sub_range = (int *)malloc(sizeof(int) * data.nprocs);
+ MPI_Allgather(&data.range, 1, MPI_INT, sub_range, 1, MPI_INT, MPI_COMM_WORLD);
+
+ for(int i=0; i<data.nprocs; i++) {
+	if(data.range > sub_range[i]) data.range = sub_range[i];
+ }
+
+ if(data.me == 0) cerr << endl << " input seq length =  " << data.range << endl << endl;
+ data.MIN_ASSEMBLY_LENGTH = data.range;
+
+// ################################################
+//
+ if(data.me == 0) cerr << endl << " Extracting  read alignment info..... " << endl << endl;
+
+  int nLink;
+
+// data.filter_offTarget = false;
+// data.filter_clipping = false;
+// nLink = mrLink->map(narg-num_args,&args[num_args],0,1,0,fileread_AlignmentInfo,&data);
+
+// data.filter_offTarget = true;
+// data.filter_clipping = false;
+// nLink = mrLink->map(narg-num_args,&args[num_args],0,1,0,fileread_AlignmentInfo,&data);
+
+// data.filter_offTarget = false;
+// data.filter_clipping = true;
+// nLink = mrLink->map(narg-num_args,&args[num_args],0,1,0,fileread_AlignmentInfo,&data);
+
+ data.filter_offTarget = true;
+ data.filter_clipping = true;
+ nLink = mrLink->map(narg-num_args,&args[num_args],0,1,0,fileread_AlignmentInfo,&data);
+
+ mrLink->add(mrSeq);
+ mrLink->collate(NULL);
+ mrLink->reduce(reduce_AlignLoc,&data);
+
+ mrLink->collate(NULL);
+
+ stringstream out_filename;
+ out_filename << "cluster_" << data.me << ".fa";
+ data.outFile.open(out_filename.str().c_str());
+// data.pFile = fopen(out_filename.str().c_str(), "w");
+
+// mrLink->reduce(reduce_print_Group_Aligned,&data);
+
+// mrLink->reduce(reduce_consensus_clustering_noPairing,&data);
+
+
+
+ mrLink->reduce(reduce_extract_AF,&data);
+ mrLink->collate(NULL);
+ mrLink->reduce(reduce_call_Variant,&data);
+
+ mrLink->gather(1);
+ mrLink->broadcast(0);
+
+
+// mrLink->reduce(reduce_call_SNV,&data);
+
+// mrLink->gather(1);
+// mrLink->sort_keys(+1); 
+
+// mrLink->map(mrLink,map_print_outSNV,&data);
+
+ data.outFile.close();
+// fclose( data.pFile );
+
+
+/*
+ stringstream outfile_read1;
+ outfile_read1 << fname_read1 << "_" << data.me;
+ data.outFile_R1.open(outfile_read1.str().c_str());
+
+ mrLink->reduce(reduce_errorCorrection_noPairing,&data);
+
+ data.outFile_R1.close();
+*/
+ 
+// mrLink->collate(NULL);
+// mrLink->reduce(reduce_Link_from_Header,&data);
+
+/* 
+ mrLink->add(mrSeq);
+ mrLink->collate(NULL);
+ mrLink->reduce(reduce_LinkID_HeadSeq,&data); 
+
+ mrLink->collate(NULL);
+
+
+while(data.On_Alignment) {
+ int dn = 1;
+ data.reference_sequence.reserve(26);
+ Fasta_reader fasta_reader(fname_ref);
+ while (true) {
+        Fasta_entry fe = fasta_reader.getNext();
+        string seq = fe.get_sequence();
+        string header = fe.get_header();
+        if (seq == "") break;
+
+        std::size_t pos = header.find_first_of(" ");
+        int chr;
+
+        if( strcmp(header.substr(0,pos).c_str(), "1") == 0) chr = 1;
+        else if( strcmp(header.substr(0,pos).c_str(), "2") == 0) chr = 2;
+        else if( strcmp(header.substr(0,pos).c_str(), "3") == 0) chr = 3;
+        else if( strcmp(header.substr(0,pos).c_str(), "4") == 0) chr = 4;
+        else if( strcmp(header.substr(0,pos).c_str(), "5") == 0) chr = 5;
+        else if( strcmp(header.substr(0,pos).c_str(), "6") == 0) chr = 6;
+        else if( strcmp(header.substr(0,pos).c_str(), "7") == 0) chr = 7;
+        else if( strcmp(header.substr(0,pos).c_str(), "8") == 0) chr = 8;
+        else if( strcmp(header.substr(0,pos).c_str(), "9") == 0) chr = 9;
+        else if( strcmp(header.substr(0,pos).c_str(),"10") == 0) chr = 10;
+        else if( strcmp(header.substr(0,pos).c_str(),"11") == 0) chr = 11;
+        else if( strcmp(header.substr(0,pos).c_str(),"12") == 0) chr = 12;
+        else if( strcmp(header.substr(0,pos).c_str(),"13") == 0) chr = 13;
+        else if( strcmp(header.substr(0,pos).c_str(),"14") == 0) chr = 14;
+        else if( strcmp(header.substr(0,pos).c_str(),"15") == 0) chr = 15;
+        else if( strcmp(header.substr(0,pos).c_str(),"16") == 0) chr = 16;
+        else if( strcmp(header.substr(0,pos).c_str(),"17") == 0) chr = 17;
+        else if( strcmp(header.substr(0,pos).c_str(),"18") == 0) chr = 18;
+        else if( strcmp(header.substr(0,pos).c_str(),"19") == 0) chr = 19;
+        else if( strcmp(header.substr(0,pos).c_str(),"20") == 0) chr = 20;
+        else if( strcmp(header.substr(0,pos).c_str(),"21") == 0) chr = 21;
+        else if( strcmp(header.substr(0,pos).c_str(),"22") == 0) chr = 22;
+        else if( strcmp(header.substr(0,pos).c_str(), "X") == 0) chr = 23;
+        else if( strcmp(header.substr(0,pos).c_str(), "Y") == 0) chr = 24;
+        else if( strcmp(header.substr(0,pos).c_str(),"MT") == 0) chr = 25;
+
+	if( (chr>=1) && (chr <= 25) ) {
+	    if(dn == chr) {
+		if(data.me == 0) cerr << dn << " " << chr << " " << header.c_str() << endl;
+		data.reference_sequence.push_back(seq);
+	 	dn++;
+	    }
+	}
+  }
+  break;
+}
+
+
+if(On_Error_Clean) {
+
+ stringstream outfile_read1;
+ outfile_read1 << fname_read1 << "_" << data.me; 
+ data.outFile_R1.open(outfile_read1.str().c_str());
+
+ stringstream outfile_read2;
+ outfile_read2 << fname_read2 << "_" << data.me;
+ data.outFile_R2.open(outfile_read2.str().c_str());
+
+ mrLink->reduce(reduce_errorCorrection_reads,&data);
+
+ data.outFile_R1.close();
+ data.outFile_R2.close();
+
+}
+
+
+if(On_Clustering) {
+
+ stringstream out_filename;
+ out_filename << "cluster_" << data.me << ".fa";
+ data.outFile.open(out_filename.str().c_str());
+
+ mrLink->reduce(reduce_consensus_clustering,&data);
+
+ data.outFile.close();
+
+}
+
+*/
+
+ MPI_Barrier(MPI_COMM_WORLD);
+
+ delete mrLink;
+ delete mrSeq;
+ delete mrBuffer;
+
+ for(size_t j = 0; j < data._target_loc.size(); j++)  free(data._target_loc[j].af);	
+
+ MPI_Finalize();
+
+}
+

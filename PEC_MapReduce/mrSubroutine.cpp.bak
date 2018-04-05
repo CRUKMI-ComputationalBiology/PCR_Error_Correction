@@ -1,0 +1,3231 @@
+
+#include "IRKE.hpp"
+#include "KmerCounter.hpp"
+#include "stacktrace.hpp"
+
+#include "typedefs.h"
+#include "mrSubroutine.h"
+
+using namespace MAPREDUCE_NS;
+using namespace std;
+
+
+void fileread_RNAseq_HeadSeq(int itask, char *fname, KeyValue *kv, void *ptr)
+{
+  Data *data = (Data *) ptr;
+  RankID rankid;
+  struct stat stbuf;
+  int flag = stat(fname,&stbuf);
+  if (flag < 0) {
+    printf("ERROR: Could not query file size\n");
+    MPI_Abort(MPI_COMM_WORLD,1);
+  }
+
+  string filename(fname);
+  std::size_t fpos = filename.find("sKmer_");
+  if( fpos != std::string::npos ) {
+
+    Fasta_reader fasta_reader(filename);
+    while (true) {
+        Fasta_entry fe = fasta_reader.getNext();
+        string seq    = fe.get_sequence();
+        string header = fe.get_header();
+        if (seq == "") break;
+
+        std::size_t pos = header.find_first_of(" ");
+        if(pos != std::string::npos) header.replace(pos,1,"_");
+
+        char *HeadSeq = (char *) malloc(sizeof(char)*(seq.length() + header.length()+1));
+        memcpy(HeadSeq, header.substr(0,header.length()).c_str(), header.length());
+        HeadSeq[header.length()] = ' ';
+        for(int i=0; i<seq.length(); i++) HeadSeq[header.length()+1+i] = seq.at(i);
+
+	std::size_t hpos = header.find_first_of("_");
+        kv->add((char *) header.substr(0,hpos).c_str(), sizeof(char)*hpos, (char *) HeadSeq, sizeof(char)*(seq.length() + header.length()+1) );
+
+        free(HeadSeq);
+	data->range = (int)seq.length();	
+    }
+
+  }
+}
+
+
+void fileread_AlignmentInfo_New(int itask, char *fname, KeyValue *kv, void *ptr)
+{
+  Data *data = (Data *) ptr;
+  struct stat stbuf;
+  int flag = stat(fname,&stbuf);
+  if (flag < 0) {
+    printf("ERROR: Could not query file size\n");
+    MPI_Abort(MPI_COMM_WORLD,1);
+  }
+
+  std::string filename(fname);
+  std::size_t fpos = filename.find("bfiltered_");
+
+  if( fpos != std::string::npos ) {
+    FILE* FS;
+    FS = fopen(filename.c_str(), "r");
+
+    int num = 0;
+
+    while (!feof(FS)) {
+        char temp_string[500];
+        char head[100];
+        char cigar[300];
+        char dummy[10];
+        int maq;
+        int misc;
+
+        sReadInfo read;
+
+        fgets(temp_string, 500, FS);
+
+        int n = sscanf(temp_string, "%s %s %d %d %s %d", dummy, head, &read.loc, &maq, cigar, &misc);
+        if(n < 5) break;
+
+        string name(head);
+        name = remove_whitespace(name);
+
+        if(      strcmp(dummy, "1") == 0) read.chr = 1;
+        else if( strcmp(dummy, "2") == 0) read.chr = 2;
+        else if( strcmp(dummy, "3") == 0) read.chr = 3;
+        else if( strcmp(dummy, "4") == 0) read.chr = 4;
+        else if( strcmp(dummy, "5") == 0) read.chr = 5;
+        else if( strcmp(dummy, "6") == 0) read.chr = 6;
+        else if( strcmp(dummy, "7") == 0) read.chr = 7;
+        else if( strcmp(dummy, "8") == 0) read.chr = 8;
+        else if( strcmp(dummy, "9") == 0) read.chr = 9;
+        else if( strcmp(dummy,"10") == 0) read.chr = 10;
+        else if( strcmp(dummy,"11") == 0) read.chr = 11;
+        else if( strcmp(dummy,"12") == 0) read.chr = 12;
+        else if( strcmp(dummy,"13") == 0) read.chr = 13;
+        else if( strcmp(dummy,"14") == 0) read.chr = 14;
+        else if( strcmp(dummy,"15") == 0) read.chr = 15;
+        else if( strcmp(dummy,"16") == 0) read.chr = 16;
+        else if( strcmp(dummy,"17") == 0) read.chr = 17;
+        else if( strcmp(dummy,"18") == 0) read.chr = 18;
+        else if( strcmp(dummy,"19") == 0) read.chr = 19;
+        else if( strcmp(dummy,"20") == 0) read.chr = 20;
+        else if( strcmp(dummy,"21") == 0) read.chr = 21;
+        else if( strcmp(dummy,"22") == 0) read.chr = 22;
+        else if( strcmp(dummy, "X") == 0) read.chr = 23;
+        else if( strcmp(dummy, "Y") == 0) read.chr = 24;
+        else if( strcmp(dummy,"MT") == 0) read.chr = 25;
+
+	std::size_t pos = name.find_first_of("_");
+	read.pe = atoi( name.substr(pos+1,1).c_str() );
+	
+        if(misc > 0)      read.strand = 1;
+        else if(misc < 0) read.strand = -1;
+        else              read.strand = 0;
+
+        bool onTarget = false;
+  	for(int i=0; i<data->_target_loc.size(); i++) {
+    	      ExonLoc _locInfo = data->_target_loc.at(i);
+	      if( read.chr == _locInfo.chr ) {
+		 if( ( read.loc >= (_locInfo.loc1 - data->flank)) && (read.loc <= (_locInfo.loc2 + data->flank)) ) 
+		  {
+			onTarget = true;
+			break;
+		  }
+
+                 if( ((read.loc+data->range-1) >= (_locInfo.loc1 - data->flank)) && ((read.loc+data->range-1) <= (_locInfo.loc2 + data->flank)) )
+                  {
+                        onTarget = true;
+                        break;
+                  }
+
+	      }
+  	}
+
+	bool onClipping = false;
+	int num_clip = parse_cigar_softclipping(cigar);
+	if((num_clip <= 2) && (num_clip >=0) ) onClipping = true;
+
+	if(data->filter_offTarget && data->filter_clipping) {
+	  if( onTarget && onClipping ) 
+		kv->add((char *) name.substr(0,pos).c_str(), sizeof(char) * pos, (char *) &read, sizeof(sReadInfo) );
+	} else if(data->filter_offTarget && onTarget) {
+                kv->add((char *) name.substr(0,pos).c_str(), sizeof(char) * pos, (char *) &read, sizeof(sReadInfo) );
+        } else if(data->filter_clipping && onClipping) {
+                kv->add((char *) name.substr(0,pos).c_str(), sizeof(char) * pos, (char *) &read, sizeof(sReadInfo) );
+        } else if(!data->filter_offTarget && !data->filter_clipping) {
+		kv->add((char *) name.substr(0,pos).c_str(), sizeof(char) * pos, (char *) &read, sizeof(sReadInfo) );
+	}
+
+
+     }
+
+  }
+
+}
+
+int parse_cigar_softclipping(char *s)
+{
+   int num_soft = 0;
+   char* p=(char*)(s);
+   while(*p!=0)
+   {
+	 char* endptr;
+
+         if(!isdigit(*p)) return -1;
+         int c_size =strtol(p,&endptr,10);
+         if(c_size<=0)    return -1;
+         p=endptr;
+
+	 int check = 0;
+         if(!isalpha(*p)) return -1;
+ 
+         if((p[0] == 'S') || (p[0] == 'H')) check++;
+	 if(check>0)    num_soft += c_size; 
+         ++p;
+   }
+   return num_soft;
+}
+
+
+void fileread_AlignmentInfo(int itask, char *fname, KeyValue *kv, void *ptr)
+{
+  Data *data = (Data *) ptr;
+  struct stat stbuf;
+  int flag = stat(fname,&stbuf);
+  if (flag < 0) {
+    printf("ERROR: Could not query file size\n");
+    MPI_Abort(MPI_COMM_WORLD,1);
+  }
+
+  std::string filename(fname);
+  std::size_t fpos = filename.find("bfiltered_");
+
+  if( fpos != std::string::npos ) {
+    FILE* FS;
+    FS = fopen(filename.c_str(), "r");
+
+    while (!feof(FS)) {
+        char temp_string[500];
+	char head[100];
+	char cigar[300];
+        char dummy[5];
+	int maq;
+	int misc;
+
+	LocInfo link;
+
+        fgets(temp_string, 850, FS);
+
+        int n = sscanf(temp_string, "%s %s %llu %d %s %d", dummy, head, &link.loc1, &maq, cigar, &misc);
+        if(n < 4) break;
+
+        string name(head);
+        name = remove_whitespace(name);
+
+	link.loc2 = 0;
+	if(      strcmp(dummy, "1") == 0) link.chr = 1;
+	else if( strcmp(dummy, "2") == 0) link.chr = 2;
+	else if( strcmp(dummy, "3") == 0) link.chr = 3;
+	else if( strcmp(dummy, "4") == 0) link.chr = 4;
+	else if( strcmp(dummy, "5") == 0) link.chr = 5;
+        else if( strcmp(dummy, "6") == 0) link.chr = 6;
+        else if( strcmp(dummy, "7") == 0) link.chr = 7;
+        else if( strcmp(dummy, "8") == 0) link.chr = 8;
+        else if( strcmp(dummy, "9") == 0) link.chr = 9;
+        else if( strcmp(dummy,"10") == 0) link.chr = 10;
+        else if( strcmp(dummy,"11") == 0) link.chr = 11;
+        else if( strcmp(dummy,"12") == 0) link.chr = 12;
+        else if( strcmp(dummy,"13") == 0) link.chr = 13;
+        else if( strcmp(dummy,"14") == 0) link.chr = 14;
+        else if( strcmp(dummy,"15") == 0) link.chr = 15;
+        else if( strcmp(dummy,"16") == 0) link.chr = 16;
+        else if( strcmp(dummy,"17") == 0) link.chr = 17;
+        else if( strcmp(dummy,"18") == 0) link.chr = 18;
+        else if( strcmp(dummy,"19") == 0) link.chr = 19;
+        else if( strcmp(dummy,"20") == 0) link.chr = 20;
+        else if( strcmp(dummy,"21") == 0) link.chr = 21;
+        else if( strcmp(dummy,"22") == 0) link.chr = 22;
+        else if( strcmp(dummy, "X") == 0) link.chr = 23;
+        else if( strcmp(dummy, "Y") == 0) link.chr = 24;
+        else if( strcmp(dummy,"MT") == 0) link.chr = 25;
+
+	if( (link.chr >= 1) && (link.chr <= 25) && (maq >= data->MAQ) ) {
+	   std::size_t pos = name.find_first_of("_");
+	   if(misc > 0) {
+	     if(name.compare(pos+1,1,"1") == 0) link.num = 0;
+	     if(name.compare(pos+1,1,"2") == 0) link.num = 1;
+	   }
+	   if(misc < 0) {
+             if(name.compare(pos+1,1,"1") == 0) link.num = 1;
+             if(name.compare(pos+1,1,"2") == 0) link.num = 0;
+           }
+
+           kv->add((char *) name.substr(0,pos).c_str(), sizeof(char) * pos, (char *) &link, sizeof(LocInfo) );
+//	   kv->add((char *) name.substr(0,name.length()).c_str(), sizeof(char) * name.length(), (char *) &link, sizeof(EDGE) );
+	}
+    }
+
+    fclose(FS);
+  }
+
+}
+
+void reduce_Link_from_Header(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr)
+{
+  if(nvalues == 2 ) {
+    Data *data = (Data *) ptr;
+    char *value;
+
+    uint64_t nvalues_total;
+    CHECK_FOR_BLOCKS(multivalue,valuebytes,nvalues,nvalues_total)
+    BEGIN_BLOCK_LOOP(multivalue,valuebytes,nvalues)
+
+       value = multivalue;
+       LocInfo *link1 = (LocInfo *) value; 
+
+       value += valuebytes[0];
+       LocInfo *link2 = (LocInfo *) value; 
+
+       if( link1->chr == link2->chr ) {
+          LocInfo pair;
+          if(link1->loc1 <= link2->loc1) {
+	    pair.loc1 = link1->loc1;
+	    pair.loc2 = link2->loc1;
+          } else {
+	    pair.loc1 = link2->loc1;
+            pair.loc2 = link1->loc1;
+          }       
+          pair.chr = link1->chr;
+	  pair.num = link1->num + link2->num;
+
+          kv->add(key,keybytes,(char *) &pair, sizeof(LocInfo));
+       }
+
+   END_BLOCK_LOOP
+  }
+} 
+
+void reduce_Link_from_Header_New(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr)
+{
+  if(nvalues == 2 ) {
+    Data *data = (Data *) ptr;
+    char *value;
+
+    uint64_t nvalues_total;
+    CHECK_FOR_BLOCKS(multivalue,valuebytes,nvalues,nvalues_total)
+    BEGIN_BLOCK_LOOP(multivalue,valuebytes,nvalues)
+
+      value = multivalue;
+      sReadInfo *link1 = (sReadInfo *) value;
+
+      value += valuebytes[0];
+      sReadInfo *link2 = (sReadInfo *) value;       
+
+      PairLink pair;
+
+      if(link1->loc <= link2->loc) {
+	    pair.chr1 = link1->chr;
+            pair.chr2 = link2->chr;
+
+            pair.pe1 = link1->pe;
+            pair.pe2 = link2->pe;
+
+            pair.loc1 = link1->loc;
+            pair.loc2 = link2->loc;
+
+//	    pair.strand1 = link1->strand;
+//          pair.strand2 = link2->strand;
+
+	    pair.strand1 = 1;
+	    pair.strand2 = 2;
+
+	    kv->add(key,keybytes,(char *) &pair, sizeof(PairLink));
+     } else {
+            pair.chr1 = link2->chr;
+            pair.chr2 = link1->chr;
+
+            pair.pe1 = link2->pe;
+            pair.pe2 = link1->pe;
+
+            pair.loc1 = link2->loc;
+            pair.loc2 = link1->loc;
+
+//            pair.strand1 = link2->strand;
+//            pair.strand2 = link1->strand;
+
+	    pair.strand1 = 2;
+            pair.strand2 = 1;
+
+	   kv->add(key,keybytes,(char *) &pair, sizeof(PairLink));
+     }
+
+    END_BLOCK_LOOP
+
+  }
+}
+
+
+void reduce_LinkID_HeadSeq(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr)
+{
+   Data *data = (Data *) ptr;
+   char *value;
+
+   uint64_t nvalues_total;
+   CHECK_FOR_BLOCKS(multivalue,valuebytes,nvalues,nvalues_total)
+   BEGIN_BLOCK_LOOP(multivalue,valuebytes,nvalues)
+
+   EDGE LinkID;
+   LocInfo locInfo;    
+   int check = 0;
+
+   value = multivalue;
+   for(int i=0; i<nvalues; i++) {
+	if(valuebytes[i] == sizeof(LocInfo)) {
+	  locInfo = *(LocInfo *) value;	
+	  check = 1;
+	  break;
+	}
+	value += valuebytes[i];
+   }
+ 
+   LinkID.vi  = locInfo.loc1;
+   LinkID.vj  = locInfo.loc2;
+   LinkID.loc = locInfo.chr;
+ 
+   if(check == 1) {
+     value = multivalue;
+     for(int i=0; i<nvalues; i++) {
+        if(valuebytes[i] != sizeof(LocInfo)) {
+	   string header(value);
+
+           char *HeadSeq = (char *) malloc(sizeof(char)*(header.length() + 2));
+           memcpy(HeadSeq, header.substr(0,header.length()).c_str(), header.length());
+           HeadSeq[header.length()] = '%';
+
+	   if( locInfo.num == 0 ) {
+	      HeadSeq[header.length()+1] = '1';	   
+	      kv->add((char *) &LinkID, sizeof(EDGE), (char *) HeadSeq, sizeof(char)*(header.length()+2));
+	   }
+	   if( locInfo.num == 2 ) {
+              HeadSeq[header.length()+1] = '2';     
+              kv->add((char *) &LinkID, sizeof(EDGE), (char *) HeadSeq, sizeof(char)*(header.length()+2));
+           }	
+
+	   free(HeadSeq);
+       }
+      value += valuebytes[i];
+     }
+   }
+
+   END_BLOCK_LOOP
+}
+
+void reduce_overlapping(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr)
+{
+   Data *data = (Data *) ptr;
+   char *value;
+
+   uint64_t nvalues_total;
+   CHECK_FOR_BLOCKS(multivalue,valuebytes,nvalues,nvalues_total)
+   BEGIN_BLOCK_LOOP(multivalue,valuebytes,nvalues)
+
+   PairLink *locInfo;
+   int check = 0;
+
+   value = multivalue;
+   for(int i=0; i<nvalues; i++) {
+        if(valuebytes[i] == sizeof(PairLink)) {
+          locInfo = (PairLink *) value;
+          check = 1;
+          break;
+        }
+        value += valuebytes[i];
+   }
+  
+   string seq1, seq2;
+   int scheck = 0;
+
+   if(check == 1) {
+     value = multivalue;
+     for(int i=0; i<nvalues; i++) {
+        if(valuebytes[i] != sizeof(PairLink)) {
+           string header(value);
+           std::size_t pos = header.find_first_of("_");
+	   std::size_t spos = header.find_first_of(" ");
+
+           if((pos != std::string::npos) && (spos != std::string::npos) ) {
+
+            if(header.compare(pos+1,1,"1") == 0) {
+		scheck++;
+		seq1 = header.substr(spos+1,data->range);
+            }
+            if(header.compare(pos+1,1,"2") == 0) {
+		scheck++;
+		seq2 = revcomp( header.substr(spos+1,data->range) );
+            }
+
+          }
+       }
+      value += valuebytes[i];
+     }
+
+     if(scheck == 2) {
+
+	  StripedSmithWaterman::Aligner aligner;
+          StripedSmithWaterman::Filter filter;
+          StripedSmithWaterman::Alignment alignment;
+	  aligner.Align(seq1.c_str(), seq2.c_str(), data->range, filter, &alignment);
+
+	 data->outFile << locInfo->chr1 << " " << locInfo->chr2 << " " << locInfo->loc1 << " " << locInfo->loc2 << " " << alignment.sw_score << " " << check_num_match(alignment) << endl;
+
+     }
+
+   }
+
+   END_BLOCK_LOOP
+}
+
+
+void reduce_LinkID_HeadSeq_New(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr)
+{
+   Data *data = (Data *) ptr;
+   char *value;
+
+   uint64_t nvalues_total;
+   CHECK_FOR_BLOCKS(multivalue,valuebytes,nvalues,nvalues_total)
+   BEGIN_BLOCK_LOOP(multivalue,valuebytes,nvalues)
+
+   PairID LinkID;
+   PairLink *locInfo;
+   int check = 0;  
+
+   value = multivalue;
+   for(int i=0; i<nvalues; i++) {
+        if(valuebytes[i] == sizeof(PairLink)) {
+          locInfo = (PairLink *) value;
+          check = 1;
+          break;
+        }
+        value += valuebytes[i];
+   }
+
+   if(check == 1) { 
+
+     LinkID.chr1 = locInfo->chr1;
+     LinkID.chr2 = locInfo->chr2;
+     LinkID.loc1 = locInfo->loc1;
+     LinkID.loc2 = locInfo->loc2;
+
+     value = multivalue;
+     for(int i=0; i<nvalues; i++) {
+        if(valuebytes[i] != sizeof(PairLink)) {
+           string header(value);
+	   std::size_t pos = header.find_first_of("_");
+	   if(pos != std::string::npos ) {
+
+	    char *HeadSeq = (char *) malloc(sizeof(char)*(header.length()));
+	    memcpy(HeadSeq, header.substr(0,header.length()).c_str(), header.length()); 
+
+	    int scheck = 0;
+	    if(header.compare(pos+1,1,"1") == 0) {
+
+	      if(locInfo->pe1 == 1) { HeadSeq[pos+1] = '1'; scheck++; }
+	      else		    { HeadSeq[pos+1] = '2'; scheck++; }
+
+	      if(scheck > 0) kv->add((char *) &LinkID, sizeof(PairID), (char *) HeadSeq, sizeof(char)*(header.length()));
+
+	    } else if(header.compare(pos+1,1,"2") == 0) {
+
+	      if(locInfo->pe2 == 1) { HeadSeq[pos+1] = '1'; scheck++; }
+              else                  { HeadSeq[pos+1] = '2'; scheck++; } 
+
+
+              if(scheck > 0) kv->add((char *) &LinkID, sizeof(PairID), (char *) HeadSeq, sizeof(char)*(header.length()));
+
+            }
+
+            free(HeadSeq);
+
+	  }
+       }
+       value += valuebytes[i];
+     }
+   }
+
+   END_BLOCK_LOOP
+}
+
+
+void reduce_print_correctedReads(char *key, int keybytes, char *multivalue, int nvalues, 
+                                 int *valuebytes, KeyValue *kv, void *ptr)
+{
+  Data *data = (Data *) ptr;
+  char *value;
+
+  uint64_t nvalues_total;
+  CHECK_FOR_BLOCKS(multivalue,valuebytes,nvalues,nvalues_total)
+  BEGIN_BLOCK_LOOP(multivalue,valuebytes,nvalues)
+
+   int check_1 = 0;
+   int check_2 = 0;
+
+   value = multivalue;
+   for(int i=0; i<nvalues; i++) {
+     string head_seq(value);
+     std::size_t pos = head_seq.find_first_of(" "); 
+     std::size_t pe_pos = head_seq.find_first_of("_");
+     std::size_t ce_pos = head_seq.find_first_of("$");
+     std::size_t d_pos = head_seq.find_first_of("%");
+
+     int PE_direction = 0;
+     if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+     if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+     if((nvalues == 4) && (ce_pos != std::string::npos)) {
+	if((PE_direction == 1) && (check_1 == 0)) {
+	    data->outFile_R1 << ">" << head_seq.substr(0,pe_pos).c_str();
+            data->outFile_R1 << " " << head_seq.substr(pe_pos+1,pos-pe_pos-1).c_str() << endl;
+            data->outFile_R1 << head_seq.substr(pos+1,data->range).c_str() << endl;	
+	    check_1++;
+	}
+        if((PE_direction == 2) && (check_2 == 0)) {
+            data->outFile_R2 << ">" << head_seq.substr(0,pe_pos).c_str();
+            data->outFile_R2 << " " << head_seq.substr(pe_pos+1,pos-pe_pos-1).c_str() << endl;
+            data->outFile_R2 << head_seq.substr(pos+1,data->range).c_str() << endl;
+            check_2++;
+        }
+     } else if((nvalues == 2) && (ce_pos == std::string::npos)) {
+        if((PE_direction == 1) && (check_1==0)) {
+            data->outFile_R1 << ">" << head_seq.substr(0,pe_pos).c_str();
+            data->outFile_R1 << " " << head_seq.substr(pe_pos+1,pos-pe_pos-1).c_str() << endl;
+            data->outFile_R1 << head_seq.substr(pos+1,data->range).c_str() << endl;
+	    check_1++;
+        }
+	if((PE_direction == 2) && (check_2==0)) {
+            data->outFile_R2 << ">" << head_seq.substr(0,pe_pos).c_str();
+            data->outFile_R2 << " " << head_seq.substr(pe_pos+1,pos-pe_pos-1).c_str() << endl;
+            data->outFile_R2 << head_seq.substr(pos+1,data->range).c_str() << endl;
+            check_2++;
+        }
+     }
+ 
+     value += valuebytes[i];
+   }
+
+  END_BLOCK_LOOP
+}
+
+// #######################################################
+//  
+//   Error Correction Reduce function
+
+void reduce_reference_errorCorrection_reads(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr)
+{
+  Data *data = (Data *) ptr;
+  char *value;
+
+  PairID LinkID = *(PairID *) key;
+
+  bool overlap = false;
+  int offset;
+  if(LinkID.loc1 <= LinkID.loc2) offset = LinkID.loc1 + data->range - 1 - LinkID.loc2;
+  else                           offset = LinkID.loc2 + data->range - 1 - LinkID.loc1;
+  if( offset > (int)data->kmer_length ) overlap = true;
+
+
+  string ref_sequence_1, ref_sequence_2;
+
+  IRKE irke_1(data->kmer_length, data->MAX_RECURSION, data->MIN_SEED_ENTROPY, data->MIN_SEED_COVERAGE,
+             data->min_any_entropy, data->PACMAN, data->CRAWL, data->crawl_length, data->DS);
+
+  IRKE irke_2(data->kmer_length, data->MAX_RECURSION, data->MIN_SEED_ENTROPY, data->MIN_SEED_COVERAGE,
+             data->min_any_entropy, data->PACMAN, data->CRAWL, data->crawl_length, data->DS);
+
+
+  StripedSmithWaterman::Aligner aligner;
+  StripedSmithWaterman::Filter filter;
+  StripedSmithWaterman::Alignment alignment;
+
+  uint64_t nvalues_total;
+  CHECK_FOR_BLOCKS(multivalue,valuebytes,nvalues,nvalues_total)
+  BEGIN_BLOCK_LOOP(multivalue,valuebytes,nvalues)
+
+if(data->On_Clean) {
+
+    if(data->On_Assemble) {
+
+   	value = multivalue;
+   	for(int i=0; i<nvalues; i++) {
+     	   string head_seq(value);
+     	   std::size_t pos = head_seq.find_first_of(" ");
+
+     	   int PE_direction = 0;
+     	   std::size_t pe_pos = head_seq.find_first_of("_");
+     	   if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+     	   if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+     	   string seq(head_seq.substr(pos+1,data->range).c_str() );
+     	   string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+     	   int nKmer = data->range - data->kmer_length + 1;
+     	   for(int j=0; j<nKmer; j++) {
+
+           string seq_kmer = seq.substr(j, data->kmer_length);
+
+              if( contains_non_gatc(seq_kmer) ) {
+                 uint64_t kmer_val = kmer_to_intval(seq_kmer);
+                 uint64_t rkmer_val = revcomp_val(kmer_val, data->kmer_length);
+
+                 if(overlap) {
+                   irke_1.add_kmer(kmer_val , 1);
+                   irke_1.add_kmer(rkmer_val , 1);
+                 } else if(PE_direction == 1) {
+                   irke_1.add_kmer(kmer_val , 1);
+                   irke_1.add_kmer(rkmer_val , 1);
+                 } else {
+                   irke_2.add_kmer(kmer_val , 1);
+                   irke_2.add_kmer(rkmer_val , 1);
+                 }
+             }
+
+          }
+
+          value += valuebytes[i];
+       }
+
+       irke_1.prune_some_kmers(data->min_kmer_count, data->min_any_entropy, data->prune_error_kmers, data->min_ratio_non_error);
+       irke_1.populate_sorted_kmers_list();
+
+       ref_sequence_1 = irke_1.compute_sequence_assemblies( data->MIN_CONNECTIVITY_RATIO, data->MIN_ASSEMBLY_LENGTH, data->MIN_ASSEMBLY_COVERAGE );
+
+       if(!overlap) {
+         irke_2.prune_some_kmers(data->min_kmer_count, data->min_any_entropy, data->prune_error_kmers, data->min_ratio_non_error);
+         irke_2.populate_sorted_kmers_list();
+         ref_sequence_2 = irke_2.compute_sequence_assemblies( data->MIN_CONNECTIVITY_RATIO, data->MIN_ASSEMBLY_LENGTH, data->MIN_ASSEMBLY_COVERAGE );
+       }
+
+    } else if(data->On_Alignment) {
+
+	if(overlap) {
+        	if(LinkID.loc1 <= LinkID.loc2) ref_sequence_1 = data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc1, LinkID.loc2-LinkID.loc1+data->range-1);
+        	else                           ref_sequence_1 = data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc2, LinkID.loc1-LinkID.loc2+data->range-1);
+	} else {
+        	ref_sequence_1 = data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc1, data->range);
+        	ref_sequence_2 = data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc2, data->range);
+	}
+
+   }
+
+   // ###################################
+
+   bool check_assembly_length = true;
+   if(ref_sequence_1.length() < data->range)                check_assembly_length = false;
+   if(!overlap && (ref_sequence_2.length() < data->range))  check_assembly_length = false;
+
+   if( check_assembly_length ) {
+
+  	int *check_error   = (int *) malloc(sizeof(int)*4);
+  	int *check_error_1 = (int *) malloc(sizeof(int)*4);
+  	int *check_error_2 = (int *) malloc(sizeof(int)*4);
+
+  	std::size_t  len_consen_1 = ref_sequence_1.size();
+  	std::size_t  len_consen_2 = 0;
+  	if(!overlap) len_consen_2 = ref_sequence_2.size();
+
+  	int *loc_consensus_1  = (int *) malloc( sizeof(int) * (len_consen_1+1)*2 );
+  	int *loc_consensus_2;
+  	if(!overlap) loc_consensus_2 = (int *) malloc( sizeof(int) * (len_consen_2+1)*2 );
+
+  	int *num_consensus1 = (int *) malloc( sizeof(int) * (len_consen_1+1) * 4 * 2 );
+  	int *num_consensus2;
+
+  	if(overlap) num_consensus2 = (int *) malloc( sizeof(int) * (len_consen_1+1) * 4 * 2 );
+  	else        num_consensus2 = (int *) malloc( sizeof(int) * (len_consen_2+1) * 4 * 2 );
+
+  	for(int i=0; i<len_consen_1*2; i++) loc_consensus_1[i] = 0;
+  	if(!overlap)
+    	   for(int i=0; i<len_consen_2*2; i++) loc_consensus_2[i] = 0;
+
+  	for(int i=0; i<len_consen_1*4*2; i++) num_consensus1[i] = 0;
+  	if(overlap) {
+        	for(int i=0; i<len_consen_1*4*2; i++) num_consensus2[i] = 0;
+  	} else {
+        	for(int i=0; i<len_consen_2*4*2; i++) num_consensus2[i] = 0;
+  	}
+
+  	string csequence_1, csequence_2;
+  	int num_sp1 = 0;
+  	int num_sp2 = 0;
+
+    	value = multivalue;
+    	for(int i=0; i<nvalues; i++) {
+       	   string head_seq(value);
+       	   std::size_t pos = head_seq.find_first_of(" ");
+
+       	   int PE_direction = 0;
+       	   std::size_t pe_pos = head_seq.find_first_of("_");
+       	   if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+       	   if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+       	   int Strand = 0;
+       	   if(overlap) { Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence_1, data->range); }
+       	   else  {
+           	if(PE_direction == 1) Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence_1, data->range);
+           	else                  Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence_2, data->range);
+       	   }
+
+       	   string seq     = head_seq.substr(pos+1,data->range).c_str();
+       	   string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+       	   if(PE_direction == 1) {
+         	alignment.Clear();
+
+         	if(Strand == 1) aligner.Align(seq.c_str(),     ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+         	else            aligner.Align(rev_seq.c_str(), ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+
+         	if(Strand == 1) get_consensus(alignment, seq,     num_consensus1);
+         	else            get_consensus(alignment, rev_seq, num_consensus1);
+
+         	num_sp1++;
+       	   }
+
+      	   if(PE_direction == 2) {
+
+           	alignment.Clear();
+           	if(overlap) {
+                   if(Strand == 1) aligner.Align(seq.c_str(),     ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+                   else            aligner.Align(rev_seq.c_str(), ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+           	} else {
+                   aligner.Align(rev_seq.c_str(), ref_sequence_2.c_str(), len_consen_2, filter, &alignment);
+                   if(Strand == 1) aligner.Align(seq.c_str(),     ref_sequence_2.c_str(), len_consen_2, filter, &alignment);
+                   else            aligner.Align(rev_seq.c_str(), ref_sequence_2.c_str(), len_consen_2, filter, &alignment);
+           	}
+
+           	if(Strand == 1) get_consensus(alignment, seq,     num_consensus2);
+           	else            get_consensus(alignment, rev_seq, num_consensus2);
+
+           	num_sp2++;
+           }
+
+      	   value += valuebytes[i];
+    	}
+
+
+
+	// ################################################################
+	//   Reference sequence rearrangement for Deletion
+	//
+
+   	int num_deletion_1 = 0;
+   	int num_deletion_2 = 0;
+	if(data->On_Alignment) {
+
+   		if(overlap) {
+        		num_deletion_1 = check_deletion_consensus(num_consensus1, num_consensus2, len_consen_1, num_sp1, num_sp2);
+   		} else {
+        		num_deletion_1 = check_deletion_consensus_single(num_consensus1, len_consen_1, num_sp1);
+        		num_deletion_2 = check_deletion_consensus_single(num_consensus2, len_consen_2, num_sp2);
+   		}
+
+   		if( overlap && (num_deletion_1 > 0) ) {
+
+        		if(LinkID.loc1 <= LinkID.loc2) ref_sequence_1.assign( data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc1, LinkID.loc2-LinkID.loc1+data->range-1 + num_deletion_1) );
+        		else                           ref_sequence_1.assign( data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc2, LinkID.loc1-LinkID.loc2+data->range-1 + num_deletion_1) );
+        		len_consen_1 = ref_sequence_1.size();
+
+        		free(loc_consensus_1);
+        		free(num_consensus1);
+
+        		loc_consensus_1 = (int *) malloc( sizeof(int) * (len_consen_1+1) * 2 );
+        		num_consensus1  = (int *) malloc( sizeof(int) * (len_consen_1+1) * 4 * 2 );
+
+        		for(int i=0; i<(len_consen_1+1)*2; i++)   loc_consensus_1[i] = 0;
+        		for(int i=0; i<(len_consen_1+1)*4*2; i++) num_consensus1[i] = 0;
+
+        		value = multivalue;
+        		for(int i=0; i<nvalues; i++) {
+           			string head_seq(value);
+           			std::size_t pos    = head_seq.find_first_of(" ");
+
+           			int PE_direction = 0;
+           			std::size_t pe_pos = head_seq.find_first_of("_");
+           			if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+           			if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+           			int Strand = 0;
+           			Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence_1, data->range);
+
+           			string seq( head_seq.substr(pos+1,data->range).c_str() );
+           			string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+           			alignment.Clear();
+           			if(Strand == 1) aligner.Align(seq.c_str(),     ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+           			else            aligner.Align(rev_seq.c_str(), ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+
+
+           			if(PE_direction == 1) {
+             				if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus1);
+             				else            get_consensus(alignment, rev_seq.c_str(), num_consensus1);
+           			}
+
+           			if(PE_direction == 2) {
+             				if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus2);
+             				else            get_consensus(alignment, rev_seq.c_str(), num_consensus2);
+           			}
+
+           			value += valuebytes[i];
+       			}
+   		}
+
+   		if( !overlap && (num_deletion_1 > 0) ) {
+
+        		ref_sequence_1.assign( data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc1, data->range + num_deletion_1) );
+        		len_consen_1 = ref_sequence_1.size();
+
+        		free(loc_consensus_1);
+        		free(num_consensus1);
+        		loc_consensus_1 = (int *) malloc( sizeof(int) * (len_consen_1+1)*2 );
+        		num_consensus1  = (int *) malloc( sizeof(int) * (len_consen_1+1) * 4 * 2 );
+
+        		for(int i=0; i<len_consen_1*2; i++)   loc_consensus_1[i] = 0;
+        		for(int i=0; i<len_consen_1*4*2; i++) num_consensus1[i] = 0;
+
+        		value = multivalue;
+        		for(int i=0; i<nvalues; i++) {
+           			string head_seq(value);
+           			std::size_t pos    = head_seq.find_first_of(" ");
+
+           			int PE_direction = 0;
+           			std::size_t pe_pos = head_seq.find_first_of("_");
+           			if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+           			if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+           		   if(PE_direction == 1) {
+             			int Strand = 0;
+             			Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence_1, data->range);
+
+             			string seq( head_seq.substr(pos+1,data->range).c_str() );
+             			string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+             			alignment.Clear();
+             			if(Strand == 1) aligner.Align(seq.c_str(),     ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+             			else            aligner.Align(rev_seq.c_str(), ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+
+             			if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus1);
+             			else            get_consensus(alignment, rev_seq.c_str(), num_consensus1);
+           		   }
+
+           			value += valuebytes[i];
+       			}
+   		}
+
+   		if( !overlap && (num_deletion_2 > 0) ) {
+
+        		ref_sequence_2.assign( data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc2, data->range + num_deletion_2) );
+        		len_consen_2 = ref_sequence_2.size();
+
+        		free(loc_consensus_2);
+        		free(num_consensus2);
+        		loc_consensus_2 = (int *) malloc( sizeof(int) * (len_consen_2+1)*2 );
+        		num_consensus2  = (int *) malloc( sizeof(int) * (len_consen_2+1) * 4 * 2 );
+
+        		for(int i=0; i<len_consen_2*2; i++)   loc_consensus_2[i] = 0;
+        		for(int i=0; i<len_consen_2*4*2; i++) num_consensus2[i] = 0;
+
+        		value = multivalue;
+        		for(int i=0; i<nvalues; i++) {
+           			string head_seq(value);
+           			std::size_t pos    = head_seq.find_first_of(" ");
+
+           			int PE_direction = 0;
+           			std::size_t pe_pos = head_seq.find_first_of("_");
+           			if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+           			if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+           		   if(PE_direction == 2) {
+             			int Strand = 0;
+             			Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence_2, data->range);
+
+             			string seq( head_seq.substr(pos+1,data->range).c_str() );
+             			string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+             			alignment.Clear();
+
+             			if(Strand == 1) aligner.Align(seq.c_str(),     ref_sequence_2.c_str(), len_consen_2, filter, &alignment);
+             			else            aligner.Align(rev_seq.c_str(), ref_sequence_2.c_str(), len_consen_2, filter, &alignment);
+
+             			if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus2);
+             			else            get_consensus(alignment, rev_seq.c_str(), num_consensus2);
+           		   }
+
+           			value += valuebytes[i];
+       			}
+   		}
+
+	}
+	// #################################################
+
+
+   	if( (num_sp1 >= 3) && (num_sp2 >= 3) ) {
+
+     		for(int k=0; k<3; k++) { check_error[k]= 0; check_error_1[k]= 0; check_error_2[k]= 0; }
+     		if(overlap) { csequence_1 = check_consensus_sequence( ref_sequence_1.c_str(), check_error, num_consensus1, num_consensus2, len_consen_1, num_sp1, num_sp2, loc_consensus_1); }
+     		else        {
+                  	csequence_1 = check_consensus_seq_single( ref_sequence_1.c_str(), check_error_1, num_consensus1, len_consen_1, num_sp1, loc_consensus_1);
+                  	csequence_2 = check_consensus_seq_single( ref_sequence_2.c_str(), check_error_2, num_consensus2, len_consen_2, num_sp2, loc_consensus_2);
+     		}
+
+    		bool check_consensus_length = true;
+    		if(csequence_1.length() < data->range)                check_consensus_length = false;
+    		if(!overlap && (csequence_2.length() < data->range))  check_consensus_length = false;
+
+    		float error_rate;
+    		if(overlap)  error_rate = 100 * ((float) check_error[2]) / ((float) ((num_sp1+num_sp2) * data->range));
+    		else         error_rate = 100 * ((float) (check_error_1[1] + check_error_2[1])) / ((float)((num_sp1+num_sp2) * data->range));
+    		if (error_rate > data->error_rate) check_consensus_length = false;
+
+		if(check_consensus_length) {
+
+                	vector<string> outName_1;
+			vector<string> outName_2;
+                	map<string,int> outHeader_1;
+                	map<string,int> outHeader_2;
+
+                	map<string,string> headInfo_1;
+                	map<string,string> headInfo_2;
+
+                	map<string,string> outReads_1;
+                	map<string,string> outReads_2;
+
+    			value = multivalue;
+     			for(int i=0; i<nvalues; i++) {
+        			string head_seq(value);
+        			std::size_t pos    = head_seq.find_first_of(" ");
+        			std::size_t pe_pos = head_seq.find_first_of("_");
+
+       				int PE_direction = 0;
+
+       				if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+       				if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+       				int Strand = 0;
+       				if(overlap)                   Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence_1, data->range); 
+       				else  {
+           				if(PE_direction == 1) Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence_1, data->range);
+           				else                  Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence_2, data->range);
+       				}
+
+       				string seq     = head_seq.substr(pos+1,data->range).c_str();
+       				string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+				int str_len;
+
+        			if(overlap) {
+
+          				if( PE_direction==1 ) {
+	
+	   				   alignment.Clear();
+	   				   if(Strand == 1) aligner.Align(seq.c_str(),     csequence_1.substr(0,len_consen_1).c_str(),len_consen_1, filter, &alignment);
+	   				   else            aligner.Align(rev_seq.c_str(), csequence_1.substr(0,len_consen_1).c_str(),len_consen_1, filter, &alignment);
+					   str_len = data->range;
+	   				   string clean_read1 = get_cleanRead(csequence_1.substr(0,len_consen_1).c_str(),alignment, seq.c_str(), &str_len);
+	   				   if(Strand != 1)  clean_read1 = revcomp( clean_read1.substr(0,str_len) );
+
+					   if(outHeader_1.count(head_seq.substr(0,pe_pos)) <= 0) {
+						outName_1.push_back( head_seq.substr(0,pe_pos) );
+						headInfo_1[head_seq.substr(0,pe_pos)] = head_seq.substr(pe_pos+1,pos-pe_pos-1);	
+						outReads_1[head_seq.substr(0,pe_pos)] = clean_read1.substr(0,str_len);
+		
+						outHeader_1[head_seq.substr(0,pe_pos)] = 1;
+					   }
+
+         				} else if( PE_direction==2 ) {
+
+	    				   alignment.Clear();
+	    				   if(Strand == 1) aligner.Align(seq.c_str(),     csequence_1.substr(0,len_consen_1).c_str(),len_consen_1, filter, &alignment);
+            				   else            aligner.Align(rev_seq.c_str(), csequence_1.substr(0,len_consen_1).c_str(),len_consen_1, filter, &alignment);
+					   str_len = data->range;
+            				   string clean_read2 = get_cleanRead(csequence_1.substr(0,len_consen_1).c_str(),alignment, seq.c_str(), &str_len);
+	    				   if(Strand != 1)  clean_read2 = revcomp( clean_read2.substr(0,str_len) );
+
+					   if(outHeader_2.count(head_seq.substr(0,pe_pos)) <= 0) {
+                                                outName_2.push_back( head_seq.substr(0,pe_pos) );
+                                                headInfo_2[head_seq.substr(0,pe_pos)] = head_seq.substr(pe_pos+1,pos-pe_pos-1);
+                                                outReads_2[head_seq.substr(0,pe_pos)] = clean_read2.substr(0,str_len);
+
+                                                outHeader_2[head_seq.substr(0,pe_pos)] = 1;
+                                           }
+
+        				}
+
+       				} else {
+
+         				if( PE_direction==1 ) {
+
+            				   alignment.Clear();
+            				   if(Strand == 1) aligner.Align(seq.c_str(),     csequence_1.substr(0,len_consen_1).c_str(),len_consen_1, filter, &alignment);
+	    				   else		   aligner.Align(rev_seq.c_str(), csequence_1.substr(0,len_consen_1).c_str(),len_consen_1, filter, &alignment);
+
+					   str_len = data->range;
+            				   string clean_read1 = get_cleanRead(csequence_1.substr(0,len_consen_1).c_str(),alignment, seq.c_str(), &str_len);
+	    				   if(Strand != 1)  clean_read1 = revcomp( clean_read1.substr(0,str_len) );
+
+					    if(outHeader_1.count(head_seq.substr(0,pe_pos)) <= 0) {
+                                                outName_1.push_back( head_seq.substr(0,pe_pos) );
+                                                headInfo_1[head_seq.substr(0,pe_pos)] = head_seq.substr(pe_pos+1,pos-pe_pos-1);
+                                                outReads_1[head_seq.substr(0,pe_pos)] = clean_read1.substr(0,str_len);
+
+                                                outHeader_1[head_seq.substr(0,pe_pos)] = 1;
+                                           }
+
+         				} else if( PE_direction==2 ) {
+
+            				   alignment.Clear();
+            				   if(Strand == 1) aligner.Align(seq.c_str(),     csequence_2.substr(0,len_consen_2).c_str(),len_consen_2, filter, &alignment);
+	    				   else            aligner.Align(rev_seq.c_str(), csequence_2.substr(0,len_consen_2).c_str(),len_consen_2, filter, &alignment);
+
+					   str_len = data->range; 
+            				   string clean_read2 = get_cleanRead(csequence_2.substr(0,len_consen_2).c_str(),alignment, seq.c_str(), &str_len);
+	    				   if(Strand != 1)  clean_read2 = revcomp( clean_read2.substr(0,str_len) );
+
+					   if(outHeader_2.count(head_seq.substr(0,pe_pos)) <= 0) {
+                                                outName_2.push_back( head_seq.substr(0,pe_pos) );
+                                                headInfo_2[head_seq.substr(0,pe_pos)] = head_seq.substr(pe_pos+1,pos-pe_pos-1);
+                                                outReads_2[head_seq.substr(0,pe_pos)] = clean_read2.substr(0,str_len);
+
+                                                outHeader_2[head_seq.substr(0,pe_pos)] = 1;
+                                           }
+
+        				}  
+
+     				}
+
+     				value += valuebytes[i];
+   			}
+
+		       if( (outName_1.size() == outName_2.size()) && (outName_1.size()>0) && (outName_2.size()>0) ) {
+			for(int i=0; i<outName_1.size(); i++) {
+				if( (outHeader_1.count(outName_1.at(i)) > 0) && (outHeader_2.count(outName_1.at(i)) > 0) ) {
+					data->outFile_R1 << ">" << outName_1.at(i).c_str() << " " << headInfo_1[outName_1.at(i)].c_str() << endl;					
+					data->outFile_R1 << outReads_1[outName_1.at(i)].c_str() << endl;
+
+					data->outFile_R2 << ">" << outName_1.at(i).c_str() << " " << headInfo_2[outName_1.at(i)].c_str() << endl;
+                                        data->outFile_R2 << outReads_2[outName_1.at(i)].c_str() << endl;
+				}	
+			}
+   		      }
+
+
+		} else if(data->On_smallCluster) {
+			print_unCleaned_reads(multivalue, nvalues, valuebytes, data->range, data->outFile_R1, data->outFile_R2);
+		}
+
+  	} else if(data->On_smallCluster) {
+		print_unCleaned_reads(multivalue, nvalues, valuebytes, data->range, data->outFile_R1, data->outFile_R2); 
+  	}
+
+  	free(check_error);
+  	free(check_error_1);
+  	free(check_error_2);
+  	free(loc_consensus_1);
+  	if(!overlap) free(loc_consensus_2);
+  	free(num_consensus1);
+  	free(num_consensus2);
+
+   } else if(data->On_smallCluster) { 
+	print_unCleaned_reads(multivalue, nvalues, valuebytes, data->range, data->outFile_R1, data->outFile_R2);
+   }	
+
+} else {
+     print_unCleaned_reads(multivalue, nvalues, valuebytes, data->range, data->outFile_R1, data->outFile_R2);
+}
+
+
+  END_BLOCK_LOOP
+
+
+}
+
+
+void print_unCleaned_reads(char *multivalue, int nvalues, int *valuebytes, int data_range, std::ofstream &outFile_R1, std::ofstream &outFile_R2) 
+{
+
+        vector<string> outName_1;
+        vector<string> outName_2;
+        map<string,int> outHeader_1;
+        map<string,int> outHeader_2;
+
+        map<string,string> headInfo_1;
+        map<string,string> headInfo_2;
+
+        map<string,string> outReads_1;
+        map<string,string> outReads_2;
+	
+        char *value = multivalue;
+        for(int i=0; i<nvalues; i++) {
+            string head_seq(value);
+            std::size_t pos = head_seq.find_first_of(" ");
+            string seq( head_seq.substr(pos+1,data_range).c_str() );
+
+            std::size_t pe_pos = head_seq.find_first_of("_");
+            int PE_direction = 0;
+            if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+            if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+          if(PE_direction == 1) {
+
+		if(outHeader_1.count(head_seq.substr(0,pe_pos)) <= 0) {
+                             outName_1.push_back( head_seq.substr(0,pe_pos) );
+                             headInfo_1[head_seq.substr(0,pe_pos)] = head_seq.substr(pe_pos+1,pos-pe_pos-1);
+                             outReads_1[head_seq.substr(0,pe_pos)] = seq.substr(0,seq.length());
+
+                             outHeader_1[head_seq.substr(0,pe_pos)] = 1;
+                }
+
+          } else if(PE_direction == 2) {
+
+		if(outHeader_2.count(head_seq.substr(0,pe_pos)) <= 0) {
+                             outName_2.push_back( head_seq.substr(0,pe_pos) );
+                             headInfo_2[head_seq.substr(0,pe_pos)] = head_seq.substr(pe_pos+1,pos-pe_pos-1);
+                             outReads_2[head_seq.substr(0,pe_pos)] = seq.substr(0,seq.length());
+
+                             outHeader_2[head_seq.substr(0,pe_pos)] = 1;
+                }
+
+            }
+
+            value += valuebytes[i];
+        }
+
+        if( (outName_1.size() == outName_2.size()) && (outName_1.size()>0) && (outName_2.size()>0) ) {
+              for(int i=0; i<outName_1.size(); i++) {
+                     if( (outHeader_1.count(outName_1.at(i)) > 0) && (outHeader_2.count(outName_1.at(i)) > 0) ) {
+                             outFile_R1 << ">" << outName_1.at(i).c_str() << " " << headInfo_1[outName_1.at(i)].c_str() << endl;
+                             outFile_R1 << outReads_1[outName_1.at(i)].c_str() << endl;
+
+                             outFile_R2 << ">" << outName_1.at(i).c_str() << " " << headInfo_2[outName_1.at(i)].c_str() << endl;
+                             outFile_R2 << outReads_2[outName_1.at(i)].c_str() << endl;
+                     }
+              }
+        }
+
+
+}
+
+
+void reduce_errorCorrection_reads(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr)
+{
+  Data *data = (Data *) ptr;
+  char *value;
+
+  PairID LinkID = *(PairID *) key;
+
+  bool overlap = false;
+  int offset;
+  if(LinkID.loc1 <= LinkID.loc2) offset = LinkID.loc1 + data->range - 1 - LinkID.loc2;
+  else                           offset = LinkID.loc2 + data->range - 1 - LinkID.loc1;
+  if( offset > (int)data->kmer_length ) overlap = true;
+
+  IRKE irke_1(data->kmer_length, data->MAX_RECURSION, data->MIN_SEED_ENTROPY, data->MIN_SEED_COVERAGE,
+             data->min_any_entropy, data->PACMAN, data->CRAWL, data->crawl_length, data->DS);
+
+  IRKE irke_2(data->kmer_length, data->MAX_RECURSION, data->MIN_SEED_ENTROPY, data->MIN_SEED_COVERAGE,
+             data->min_any_entropy, data->PACMAN, data->CRAWL, data->crawl_length, data->DS);
+
+  StripedSmithWaterman::Aligner aligner;
+  StripedSmithWaterman::Filter filter;
+  StripedSmithWaterman::Alignment alignment;
+
+  int num_sp1 = 0;
+  int num_sp2 = 0;
+
+  uint64_t nvalues_total;
+  CHECK_FOR_BLOCKS(multivalue,valuebytes,nvalues,nvalues_total)
+  BEGIN_BLOCK_LOOP(multivalue,valuebytes,nvalues)
+
+   value = multivalue;
+   for(int i=0; i<nvalues; i++) {
+     string head_seq(value);
+     std::size_t pos = head_seq.find_first_of(" ");
+
+     int PE_direction = 0;
+     std::size_t pe_pos = head_seq.find_first_of("_");
+     if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+     if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+     string seq(head_seq.substr(pos+1,data->range).c_str() );
+     string rev_seq = revcomp( seq.substr(0,data->range) );
+
+     int nKmer = data->range - data->kmer_length + 1;
+     for(int j=0; j<nKmer; j++) {
+
+        string seq_kmer = seq.substr(j, data->kmer_length);
+
+        if( contains_non_gatc(seq_kmer) ) {
+            uint64_t kmer_val = kmer_to_intval(seq_kmer);
+            uint64_t rkmer_val = revcomp_val(kmer_val, data->kmer_length);
+
+            if(overlap) {
+                irke_1.add_kmer(kmer_val , 1);
+                irke_1.add_kmer(rkmer_val , 1);
+            } else if(PE_direction == 1) {
+                irke_1.add_kmer(kmer_val , 1);
+                irke_1.add_kmer(rkmer_val , 1);
+            } else {
+                irke_2.add_kmer(kmer_val , 1);
+                irke_2.add_kmer(rkmer_val , 1);
+            }
+
+        }
+
+	if(PE_direction == 1) num_sp1++;
+	if(PE_direction == 2) num_sp2++;
+
+     }
+
+     value += valuebytes[i];
+   }
+
+    irke_1.prune_some_kmers(data->min_kmer_count, data->min_any_entropy, data->prune_error_kmers, data->min_ratio_non_error);
+    irke_1.populate_sorted_kmers_list();
+
+    string assembled_sequence_1 =
+      irke_1.compute_sequence_assemblies( data->MIN_CONNECTIVITY_RATIO, data->MIN_ASSEMBLY_LENGTH, data->MIN_ASSEMBLY_COVERAGE );
+
+    string assembled_sequence_2;
+    if(!overlap) {
+      irke_2.prune_some_kmers(data->min_kmer_count, data->min_any_entropy, data->prune_error_kmers, data->min_ratio_non_error);
+      irke_2.populate_sorted_kmers_list();
+      assembled_sequence_2 =
+        irke_2.compute_sequence_assemblies( data->MIN_CONNECTIVITY_RATIO, data->MIN_ASSEMBLY_LENGTH, data->MIN_ASSEMBLY_COVERAGE );
+    }
+
+    std::size_t len_consen_1 = assembled_sequence_1.length();
+    std::size_t len_consen_2 = assembled_sequence_2.length();
+
+  bool check_assembly_length = true;
+  if(assembled_sequence_1.length() < data->range)               check_assembly_length = false; 
+  if(!overlap && (assembled_sequence_2.length() < data->range)) check_assembly_length = false;
+
+  if( (num_sp1 >= 3) && (num_sp2 >= 3) && check_assembly_length ) {
+
+    value = multivalue;
+    for(int i=0; i<nvalues; i++) {
+        string head_seq(value);
+        std::size_t pos    = head_seq.find_first_of(" ");
+	std::size_t pe_pos = head_seq.find_first_of("_");
+
+        int PE_direction = 0;
+        int Strand = 0;
+        Get_DirectionStrand(head_seq, &PE_direction, &Strand, assembled_sequence_1, data->range);
+
+        string seq( head_seq.substr(pos+1,data->range).c_str() );
+        string rev_seq = revcomp( seq.substr(0,data->range) );
+
+	alignment.Clear();
+	int num_match;
+
+        if( PE_direction==1 ) { 
+	   if(Strand == 1) aligner.Align(seq.c_str(), assembled_sequence_1.c_str(), len_consen_1, filter, &alignment);
+	   else		   aligner.Align(rev_seq.c_str(), assembled_sequence_1.c_str(), len_consen_1, filter, &alignment);
+	   num_match = check_num_match(alignment);
+           data->outFile_R1 << ">" << head_seq.substr(0,pe_pos).c_str() << " " << head_seq.substr(pe_pos+1,pos-pe_pos-1).c_str() << " " << num_match << " " << alignment.mismatches << endl;
+	   if(Strand == 1) data->outFile_R1 << assembled_sequence_1.substr(0,data->range).c_str() << endl;
+	   else {
+	           string out_seq = revcomp( assembled_sequence_1.substr(0,data->range) ); 
+		   data->outFile_R1 << out_seq.c_str() << endl; 
+	   }
+
+//           char *HeadSeq = (char *) malloc(sizeof(char)*(seq.length() + head_seq.length()+2));
+//           memcpy(HeadSeq, head_seq.substr(0,head_seq.length()).c_str(), head_seq.length());
+//           HeadSeq[head_seq.length()] = ' ';
+//           for(int i=0; i<seq.length(); i++) HeadSeq[head_seq.length()+1+i] = assembled_sequence_1.at(i);
+//	   HeadSeq[head_seq.length()+1+seq.length()] = '$';
+
+//	   kv->add((char *) head_seq.substr(0,pe_pos).c_str(), sizeof(char)*pe_pos, 
+//                   (char *) HeadSeq, sizeof(char)*(seq.length() + head_seq.length()+2) );
+	     
+//           free(HeadSeq); 
+        }
+
+	if( PE_direction==2 ) { 
+           if(overlap) {
+		if(Strand == 1) aligner.Align(rev_seq.c_str(), assembled_sequence_1.c_str(), len_consen_1, filter, &alignment); 
+		else            aligner.Align(    seq.c_str(), assembled_sequence_1.c_str(), len_consen_1, filter, &alignment);
+	   } else {	      
+		if(Strand == 1) aligner.Align(rev_seq.c_str(), assembled_sequence_2.c_str(), len_consen_2, filter, &alignment); 
+	        else            aligner.Align(    seq.c_str(), assembled_sequence_1.c_str(), len_consen_1, filter, &alignment);
+	   }
+
+	   num_match = check_num_match(alignment);
+
+           data->outFile_R2 << ">" << head_seq.substr(0,pe_pos).c_str() << " " << head_seq.substr(pe_pos+1,pos-pe_pos-1).c_str() << " " << num_match << " " << alignment.mismatches << endl;
+
+	   string out_seq;
+	   if(overlap) {
+		if(Strand == 1) out_seq = revcomp( assembled_sequence_1.substr(len_consen_1 - data->range, data->range) );
+		else            out_seq = assembled_sequence_1.substr(len_consen_1 - data->range, data->range);
+		data->outFile_R2 << out_seq.c_str() << endl;  
+	   } else {	       
+		if(Strand == 1) out_seq = revcomp( assembled_sequence_2.substr(len_consen_2 - data->range, data->range) );
+	        else            out_seq = assembled_sequence_2.substr(len_consen_2 - data->range, data->range); 
+		data->outFile_R2 << out_seq.c_str() << endl;       
+	   }
+//	   data->outFile_R2 << out_seq.c_str() << endl; 
+
+//	   char *HeadSeq = (char *) malloc(sizeof(char)*(seq.length() + head_seq.length()+2));
+//           memcpy(HeadSeq, head_seq.substr(0,head_seq.length()).c_str(), head_seq.length());
+//           HeadSeq[head_seq.length()] = ' ';
+//	   for(int i=0; i<seq.length(); i++) HeadSeq[head_seq.length()+1+i] = out_seq.at(i);
+//           HeadSeq[head_seq.length()+1+seq.length()] = '$';
+
+//           kv->add((char *) head_seq.substr(0,pe_pos).c_str(), sizeof(char)*pe_pos, 
+//	           (char *) HeadSeq, sizeof(char)*(seq.length() + head_seq.length()+2) );
+
+//           free(HeadSeq);
+
+	} 
+	  	     
+     value += valuebytes[i];
+  }
+
+// } else {
+
+//    value = multivalue;
+//    for(int i=0; i<nvalues; i++) {
+//        string head_seq(value);
+//        std::size_t pos = head_seq.find_first_of(" ");
+//        string seq( head_seq.substr(pos+1,data->range).c_str() );
+
+//        std::size_t pe_pos = head_seq.find_first_of("_");
+//        int PE_direction = 0;
+//        if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+//        if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;   
+
+//	if(PE_direction == 1) {
+//	   data->outFile_R1 << ">" << head_seq.substr(0,pe_pos).c_str() << " " << head_seq.substr(pe_pos+1,pos-pe_pos-1).c_str() << " " << -1 << " " << -1 << endl;	
+//	   data->outFile_R1 << seq.substr(0,seq.length()).c_str() << endl;
+//	}
+
+//	if(PE_direction == 2) {
+//           data->outFile_R2 << ">" << head_seq.substr(0,pe_pos).c_str() << " " << head_seq.substr(pe_pos+1,pos-pe_pos-1).c_str() << " " << -1 << " " << -1 << endl;     
+//           data->outFile_R2 << seq.substr(0,seq.length()).c_str() << endl;
+//        }	
+
+//        value += valuebytes[i];
+//    }
+ }
+
+ END_BLOCK_LOOP
+}
+
+
+void reduce_print_interChrRearrangement(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr)
+{
+  Data *data = (Data *) ptr;
+
+  PairID *pair = (PairID *) key;
+  data->outFile << pair->chr1 << " " << pair->chr2 << " " << pair->loc1 << " " << pair->loc2 << " " << nvalues << endl;
+}
+
+
+// **********
+
+void reduce_base_contrast(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr)
+{
+
+  Data *data = (Data *) ptr;
+  char *value;
+
+  PairID LinkID = *(PairID *) key;
+
+  int num_sp1 = 0;
+  int num_sp2 = 0;
+
+  std::size_t  len_consen;
+
+  bool overlap = false;
+  int offset;
+  if(LinkID.loc1 <= LinkID.loc2) offset = LinkID.loc1 + data->range - 1 - LinkID.loc2;
+  else                           offset = LinkID.loc2 + data->range - 1 - LinkID.loc1;
+  if( offset >= data->OVERLAP ) overlap = true;
+
+  string ref_sequence;
+
+  if(data->On_Alignment) {
+    if(overlap) {
+        if(LinkID.loc1 <= LinkID.loc2) ref_sequence = data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc1, LinkID.loc2-LinkID.loc1+data->range-1);
+        else                           ref_sequence = data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc2, LinkID.loc1-LinkID.loc2+data->range-1);
+    } 
+  }
+
+  IRKE irke(data->kmer_length, data->MAX_RECURSION, data->MIN_SEED_ENTROPY, data->MIN_SEED_COVERAGE,
+            data->min_any_entropy, data->PACMAN, data->CRAWL, data->crawl_length, data->DS);
+
+  StripedSmithWaterman::Aligner aligner;
+  StripedSmithWaterman::Filter filter;
+  StripedSmithWaterman::Alignment alignment;
+
+  uint64_t nvalues_total;
+  CHECK_FOR_BLOCKS(multivalue,valuebytes,nvalues,nvalues_total)
+  BEGIN_BLOCK_LOOP(multivalue,valuebytes,nvalues)
+
+// --------------------------------------------------
+if(data->On_Assemble) {
+
+   value = multivalue;
+   for(int i=0; i<nvalues; i++) {
+     string head_seq(value);
+     std::size_t pos = head_seq.find_first_of(" ");
+
+     int PE_direction = 0;
+     std::size_t pe_pos = head_seq.find_first_of("_");
+     if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+     if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+     string seq(head_seq.substr(pos+1,data->range).c_str() );
+     string rev_seq = revcomp( seq.substr(0,data->range) );
+
+     int nKmer = data->range - data->kmer_length + 1;
+     for(int j=0; j<nKmer; j++) {
+
+        string seq_kmer = seq.substr(j, data->kmer_length);
+
+        if( contains_non_gatc(seq_kmer) ) {
+            uint64_t kmer_val = kmer_to_intval(seq_kmer);
+            uint64_t rkmer_val = revcomp_val(kmer_val, data->kmer_length);
+
+            if(overlap) {
+                irke.add_kmer(kmer_val , 1);
+                irke.add_kmer(rkmer_val , 1);
+            }
+
+        }
+
+     }
+
+     value += valuebytes[i];
+   }
+
+    irke.prune_some_kmers(data->min_kmer_count, data->min_any_entropy, data->prune_error_kmers, data->min_ratio_non_error);
+    irke.populate_sorted_kmers_list();
+
+    ref_sequence = irke.compute_sequence_assemblies( data->MIN_CONNECTIVITY_RATIO, data->MIN_ASSEMBLY_LENGTH, data->MIN_ASSEMBLY_COVERAGE );
+
+}
+//-------------------------------------------
+
+
+  int *check_error   = (int *) malloc(sizeof(int)*4);
+  len_consen = ref_sequence.size();
+  int *loc_consensus  = (int *) malloc( sizeof(int) * (len_consen+1)*2 );
+  int *num_consensus1 = (int *) malloc( sizeof(int) * (len_consen+1) * 4 * 2 );
+  int *num_consensus2 = (int *) malloc( sizeof(int) * (len_consen+1) * 4 * 2 );
+
+  for(int i=0; i<(len_consen+1)*2; i++) loc_consensus[i] = 0;
+
+  for(int i=0; i<(len_consen+1)*4*2; i++) num_consensus1[i] = 0;
+  for(int i=0; i<(len_consen+1)*4*2; i++) num_consensus2[i] = 0;
+
+
+  string csequence;
+
+  if( overlap && (len_consen >= data->range) && (nvalues >= 6) ) {
+
+    value = multivalue;
+    for(int i=0; i<nvalues; i++) {
+       string head_seq(value);
+       std::size_t pos    = head_seq.find_first_of(" ");
+
+       int PE_direction = 0;
+       std::size_t pe_pos = head_seq.find_first_of("_");
+       if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+       if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+       string seq( head_seq.substr(pos+1,data->range).c_str() );
+       string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+       if(PE_direction == 1) {
+
+         int Strand = 0;
+         Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence, data->range);
+
+         alignment.Clear();
+
+         if(Strand == 1) aligner.Align(seq.c_str(),     ref_sequence.c_str(), len_consen, filter, &alignment);
+         else            aligner.Align(rev_seq.c_str(), ref_sequence.c_str(), len_consen, filter, &alignment);
+
+         if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus1);
+         else            get_consensus(alignment, rev_seq.c_str(), num_consensus1);
+
+         num_sp1++;
+       }
+
+      value += valuebytes[i];
+    }
+
+    value = multivalue;
+    for(int i=0; i<nvalues; i++) {
+       string head_seq(value);
+       std::size_t pos    = head_seq.find_first_of(" ");
+
+       int PE_direction = 0;
+       std::size_t pe_pos = head_seq.find_first_of("_");
+       if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+       if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+       string seq( head_seq.substr(pos+1,data->range).c_str() );
+       string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+       if(PE_direction == 2) {
+
+        int Strand = 0;
+        Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence, data->range);
+
+
+        alignment.Clear();
+        if(Strand == 1) aligner.Align(seq.c_str(),     ref_sequence.c_str(), len_consen, filter, &alignment);
+        else            aligner.Align(rev_seq.c_str(), ref_sequence.c_str(), len_consen, filter, &alignment);
+
+        if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus2);
+        else            get_consensus(alignment, rev_seq.c_str(), num_consensus2);
+
+
+        num_sp2++;
+      }
+
+      value += valuebytes[i];
+    }
+
+   int num_deletion = 0;
+
+/*
+if(data->On_Alignment) {
+
+   num_deletion = check_deletion_consensus(num_consensus1, num_consensus2, len_consen, num_sp1, num_sp2);
+
+   if( overlap && (num_deletion > 0) ) {
+
+        if(LinkID.loc1 <= LinkID.loc2) ref_sequence.assign( data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc1, LinkID.loc2-LinkID.loc1+data->range-1 + num_deletion) );
+        else                           ref_sequence.assign( data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc2, LinkID.loc1-LinkID.loc2+data->range-1 + num_deletion) );
+        len_consen = ref_sequence.size();
+
+        free(loc_consensus);
+        free(num_consensus1);
+        loc_consensus = (int *) malloc( sizeof(int) * (len_consen+1) * 2 );
+        num_consensus1  = (int *) malloc( sizeof(int) * (len_consen+1) * 4 * 2 );
+
+        for(int i=0; i<(len_consen+1)*2; i++)   loc_consensus[i] = 0;
+        for(int i=0; i<(len_consen+1)*4*2; i++) num_consensus1[i] = 0;
+	for(int i=0; i<(len_consen+1)*4*2; i++) num_consensus2[i] = 0;
+
+        value = multivalue;
+        for(int i=0; i<nvalues; i++) {
+           string head_seq(value);
+           std::size_t pos    = head_seq.find_first_of(" ");
+
+           int PE_direction = 0;
+           std::size_t pe_pos = head_seq.find_first_of("_");
+           if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+           if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+           int Strand = 0;
+           Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence, data->range);
+
+           string seq( head_seq.substr(pos+1,data->range).c_str() );
+           string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+           alignment.Clear();
+           if(Strand == 1) aligner.Align(seq.c_str(),     ref_sequence.c_str(), len_consen, filter, &alignment);
+           else            aligner.Align(rev_seq.c_str(), ref_sequence.c_str(), len_consen, filter, &alignment);
+
+
+           if(PE_direction == 1) {
+             if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus1);
+             else            get_consensus(alignment, rev_seq.c_str(), num_consensus1);
+           }
+
+           if(PE_direction == 2) {
+             if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus2);
+             else            get_consensus(alignment, rev_seq.c_str(), num_consensus2);
+           }
+
+           value += valuebytes[i];
+       }
+   }
+
+}
+
+   for(int i=0; i<(len_consen+1)*4*2; i++) num_consensus1[i] = 0;
+   for(int i=0; i<(len_consen+1)*4*2; i++) num_consensus2[i] = 0;
+
+   for(int k=0; k<3; k++) check_error[k]= 0; 
+   csequence = check_consensus_sequence( ref_sequence.c_str(), check_error, num_consensus1, num_consensus2, len_consen, num_sp1, num_sp2, loc_consensus); 
+   csequence = csequence.substr(0,len_consen);
+
+   value = multivalue;
+   for(int i=0; i<nvalues; i++) {
+       string head_seq(value);
+       std::size_t pos    = head_seq.find_first_of(" ");
+
+       int PE_direction = 0;
+       std::size_t pe_pos = head_seq.find_first_of("_");
+       if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+       if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+       if(PE_direction == 1) {
+
+         int Strand = 0;
+         Get_DirectionStrand(head_seq, &PE_direction, &Strand, csequence, data->range);
+         string seq( head_seq.substr(pos+1,data->range).c_str() );
+         string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+         alignment.Clear();
+
+         if(Strand == 1) aligner.Align(seq.c_str(),     csequence.c_str(), len_consen, filter, &alignment);
+         else            aligner.Align(rev_seq.c_str(), csequence.c_str(), len_consen, filter, &alignment);
+
+         if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus1);
+         else            get_consensus(alignment, rev_seq.c_str(), num_consensus1);
+
+       }
+
+      value += valuebytes[i];
+   }
+
+    value = multivalue;
+    for(int i=0; i<nvalues; i++) {
+      string head_seq(value);
+      std::size_t pos = head_seq.find_first_of(" ");
+
+      int PE_direction = 0;
+      std::size_t pe_pos = head_seq.find_first_of("_");
+      if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+      if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+      if(PE_direction == 2) {
+
+        int Strand = 0;
+        Get_DirectionStrand(head_seq, &PE_direction, &Strand, csequence, data->range);
+
+        string seq( head_seq.substr(pos+1,data->range).c_str() );
+        string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+        alignment.Clear();
+        if(Strand == 1) aligner.Align(seq.c_str(),     csequence.c_str(), len_consen, filter, &alignment);
+        else            aligner.Align(rev_seq.c_str(), csequence.c_str(), len_consen, filter, &alignment);
+
+        if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus2);
+        else            get_consensus(alignment, rev_seq.c_str(), num_consensus2);
+
+      }
+
+      value += valuebytes[i];
+    }
+
+*/
+
+   int *base_contrast = (int *) malloc( sizeof(int) * len_consen);
+   int *depth = (int *) malloc( sizeof(int) * len_consen);
+   check_base_contrast(base_contrast, depth, ref_sequence.c_str(), num_consensus1, num_consensus2, len_consen, num_sp1, num_sp2, loc_consensus);
+
+   for(int k=0; k<len_consen; k++) {
+	if((loc_consensus[k] == 1) && (base_contrast[k] > 0)) data->outFile << base_contrast[k] << "\t" << depth[k] << "\t" << num_sp1 << "\t" << num_sp2 << endl; 
+   }
+
+   free(base_contrast);
+   free(depth);
+  }
+
+
+  free(check_error);
+  free(loc_consensus);
+  free(num_consensus1);
+  free(num_consensus2);
+
+  END_BLOCK_LOOP
+
+}
+
+
+// *******
+void reduce_reference_consensus_statistics(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr)
+{
+  Data *data = (Data *) ptr;
+  char *value;
+
+
+  PairID LinkID = *(PairID *) key;
+
+  int num_sp1 = 0;
+  int num_sp2 = 0;
+
+  std::size_t  len_consen_1, len_consen_2;
+
+  bool overlap = false;
+  int offset;
+  if(LinkID.loc1 <= LinkID.loc2) offset = LinkID.loc1 + data->range - 1 - LinkID.loc2;
+  else                           offset = LinkID.loc2 + data->range - 1 - LinkID.loc1;
+  if( offset >= data->OVERLAP ) overlap = true;
+
+  string ref_sequence_1, ref_sequence_2; 
+
+if(data->On_Alignment) {
+  if(overlap) {
+	if(LinkID.loc1 <= LinkID.loc2) ref_sequence_1 = data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc1, LinkID.loc2-LinkID.loc1+data->range-1);
+	else			       ref_sequence_1 = data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc2, LinkID.loc1-LinkID.loc2+data->range-1);
+  } else {
+        ref_sequence_1 = data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc1, data->range);
+        ref_sequence_2 = data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc2, data->range);
+  }
+}
+
+  IRKE irke_1(data->kmer_length, data->MAX_RECURSION, data->MIN_SEED_ENTROPY, data->MIN_SEED_COVERAGE,
+             data->min_any_entropy, data->PACMAN, data->CRAWL, data->crawl_length, data->DS);
+
+  IRKE irke_2(data->kmer_length, data->MAX_RECURSION, data->MIN_SEED_ENTROPY, data->MIN_SEED_COVERAGE,
+             data->min_any_entropy, data->PACMAN, data->CRAWL, data->crawl_length, data->DS);
+
+  StripedSmithWaterman::Aligner aligner;
+  StripedSmithWaterman::Filter filter;
+  StripedSmithWaterman::Alignment alignment;
+
+  uint64_t nvalues_total;
+  CHECK_FOR_BLOCKS(multivalue,valuebytes,nvalues,nvalues_total)
+  BEGIN_BLOCK_LOOP(multivalue,valuebytes,nvalues)
+
+
+if(data->On_Assemble) {
+
+   value = multivalue;
+   for(int i=0; i<nvalues; i++) {
+     string head_seq(value);
+     std::size_t pos = head_seq.find_first_of(" ");
+
+     int PE_direction = 0;
+     std::size_t pe_pos = head_seq.find_first_of("_");
+     if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+     if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+     string seq(head_seq.substr(pos+1,data->range).c_str() );
+     string rev_seq = revcomp( seq.substr(0,data->range) );
+
+     int nKmer = data->range - data->kmer_length + 1;
+     for(int j=0; j<nKmer; j++) {
+
+        string seq_kmer = seq.substr(j, data->kmer_length);
+
+        if( contains_non_gatc(seq_kmer) ) {
+            uint64_t kmer_val = kmer_to_intval(seq_kmer);
+            uint64_t rkmer_val = revcomp_val(kmer_val, data->kmer_length);
+
+            if(overlap) {
+                irke_1.add_kmer(kmer_val , 1);
+                irke_1.add_kmer(rkmer_val , 1);
+            } else if(PE_direction == 1) {
+                irke_1.add_kmer(kmer_val , 1);
+                irke_1.add_kmer(rkmer_val , 1);
+            } else {
+                irke_2.add_kmer(kmer_val , 1);
+                irke_2.add_kmer(rkmer_val , 1);
+            }
+
+        }
+
+     }
+
+     value += valuebytes[i];
+   }
+
+    irke_1.prune_some_kmers(data->min_kmer_count, data->min_any_entropy, data->prune_error_kmers, data->min_ratio_non_error);
+    irke_1.populate_sorted_kmers_list();
+
+    ref_sequence_1 =
+        irke_1.compute_sequence_assemblies( data->MIN_CONNECTIVITY_RATIO, data->MIN_ASSEMBLY_LENGTH, data->MIN_ASSEMBLY_COVERAGE );
+
+    if(!overlap) {
+      irke_2.prune_some_kmers(data->min_kmer_count, data->min_any_entropy, data->prune_error_kmers, data->min_ratio_non_error);
+      irke_2.populate_sorted_kmers_list();
+      ref_sequence_2 =
+        irke_2.compute_sequence_assemblies( data->MIN_CONNECTIVITY_RATIO, data->MIN_ASSEMBLY_LENGTH, data->MIN_ASSEMBLY_COVERAGE );
+    }
+
+}
+
+
+  int *check_error   = (int *) malloc(sizeof(int)*4);
+  int *check_error_1 = (int *) malloc(sizeof(int)*4);
+  int *check_error_2 = (int *) malloc(sizeof(int)*4);
+
+  len_consen_1 = ref_sequence_1.size();
+  if(!overlap) len_consen_2 = ref_sequence_2.size();
+
+  int *loc_consensus_1  = (int *) malloc( sizeof(int) * (len_consen_1+1)*2 );
+  int *loc_consensus_2;
+  if(!overlap) loc_consensus_2 = (int *) malloc( sizeof(int) * (len_consen_2+1)*2 );
+
+  int *num_consensus1 = (int *) malloc( sizeof(int) * (len_consen_1+1) * 4 * 2 );
+  int *num_consensus2;
+
+  if(overlap) num_consensus2 = (int *) malloc( sizeof(int) * (len_consen_1+1) * 4 * 2 );
+  else        num_consensus2 = (int *) malloc( sizeof(int) * (len_consen_2+1) * 4 * 2 );
+
+  for(int i=0; i<(len_consen_1+1)*2; i++) loc_consensus_1[i] = 0;
+  if(!overlap)
+    for(int i=0; i<(len_consen_2+1)*2; i++) loc_consensus_2[i] = 0;
+
+  for(int i=0; i<(len_consen_1+1)*4*2; i++) num_consensus1[i] = 0;
+  if(overlap) {
+        for(int i=0; i<(len_consen_1+1)*4*2; i++) num_consensus2[i] = 0;
+  } else {
+        for(int i=0; i<(len_consen_2+1)*4*2; i++) num_consensus2[i] = 0;
+  }
+
+  data->outFile << ">chr:" << LinkID.chr1 << " " << offset << " " << LinkID.loc1 << " " << LinkID.loc2 << " " << len_consen_1 << " " << nvalues << endl;
+
+  uint64_t min_score_1 = 1000000;
+  uint64_t min_score_2 = 1000000;
+
+  uint64_t max_score_1 = 0;
+  uint64_t max_score_2 = 0;
+
+  uint64_t sw_score_1 = 0;
+  uint64_t sw_score_2 = 0;
+
+  string csequence_1, csequence_2;
+
+  if( (overlap && (len_consen_1 >= data->range) && (nvalues >= 6)) || (!overlap && (len_consen_1 >= data->range) && (len_consen_2 >= data->range) && (nvalues >= 6)) ) {
+
+    value = multivalue;
+    for(int i=0; i<nvalues; i++) {
+       string head_seq(value);
+       std::size_t pos    = head_seq.find_first_of(" ");
+
+       int PE_direction = 0;
+       std::size_t pe_pos = head_seq.find_first_of("_");
+       if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+       if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+       string seq( head_seq.substr(pos+1,data->range).c_str() );
+       string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+       if(PE_direction == 1) {
+
+	 int Strand = 0;
+	 Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence_1, data->range);
+
+         alignment.Clear();
+
+         if(Strand == 1) aligner.Align(seq.c_str(),     ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+         else            aligner.Align(rev_seq.c_str(), ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+
+         if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus1);
+         else            get_consensus(alignment, rev_seq.c_str(), num_consensus1);
+
+         num_sp1++;
+       }
+
+      value += valuebytes[i];
+    }
+
+
+    value = multivalue;
+    for(int i=0; i<nvalues; i++) {
+       string head_seq(value);
+       std::size_t pos    = head_seq.find_first_of(" ");
+
+       int PE_direction = 0;
+       std::size_t pe_pos = head_seq.find_first_of("_");
+       if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+       if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+       string seq( head_seq.substr(pos+1,data->range).c_str() );
+       string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+       if(PE_direction == 2) {
+
+	int Strand = 0;
+	if(overlap) Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence_1, data->range);
+	else	    Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence_2, data->range);
+
+
+        alignment.Clear();
+        if(overlap) {
+                if(Strand == 1) aligner.Align(seq.c_str(),     ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+                else            aligner.Align(rev_seq.c_str(), ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+
+                if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus2);
+                else            get_consensus(alignment, rev_seq.c_str(), num_consensus2);
+
+        } else {
+                if(Strand == 1) aligner.Align(seq.c_str(),     ref_sequence_2.c_str(), len_consen_2, filter, &alignment);
+                else            aligner.Align(rev_seq.c_str(), ref_sequence_2.c_str(), len_consen_2, filter, &alignment);
+
+                if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus2);
+                else            get_consensus(alignment, rev_seq.c_str(), num_consensus2);
+        }
+
+        num_sp2++;
+      }
+
+      value += valuebytes[i];
+    }
+
+
+   int num_deletion_1 = 0;
+   int num_deletion_2 = 0;
+
+if(data->On_Alignment) {
+
+   if(overlap) {
+        num_deletion_1 = check_deletion_consensus(num_consensus1, num_consensus2, len_consen_1, num_sp1, num_sp2);
+   } else {
+	num_deletion_1 = check_deletion_consensus_single(num_consensus1, len_consen_1, num_sp1);
+	num_deletion_2 = check_deletion_consensus_single(num_consensus2, len_consen_2, num_sp2);
+   }
+
+   if( overlap && (num_deletion_1 > 0) ) {
+
+        if(LinkID.loc1 <= LinkID.loc2) ref_sequence_1.assign( data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc1, LinkID.loc2-LinkID.loc1+data->range-1 + num_deletion_1) );
+        else                           ref_sequence_1.assign( data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc2, LinkID.loc1-LinkID.loc2+data->range-1 + num_deletion_1) );
+        len_consen_1 = ref_sequence_1.size();
+    
+        free(loc_consensus_1);
+	free(num_consensus1); 
+        loc_consensus_1 = (int *) malloc( sizeof(int) * (len_consen_1+1) * 2 );
+        num_consensus1  = (int *) malloc( sizeof(int) * (len_consen_1+1) * 4 * 2 );
+    
+	for(int i=0; i<(len_consen_1+1)*2; i++)   loc_consensus_1[i] = 0;
+	for(int i=0; i<(len_consen_1+1)*4*2; i++) num_consensus1[i] = 0;
+	for(int i=0; i<(len_consen_1+1)*4*2; i++) num_consensus2[i] = 0;
+
+        value = multivalue;
+        for(int i=0; i<nvalues; i++) {
+           string head_seq(value);
+           std::size_t pos    = head_seq.find_first_of(" ");
+
+           int PE_direction = 0;
+           std::size_t pe_pos = head_seq.find_first_of("_");
+           if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+           if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+           int Strand = 0;
+           Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence_1, data->range); 
+
+           string seq( head_seq.substr(pos+1,data->range).c_str() );
+           string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+	   alignment.Clear();
+           if(Strand == 1) aligner.Align(seq.c_str(),     ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+           else            aligner.Align(rev_seq.c_str(), ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+
+
+           if(PE_direction == 1) {
+
+             if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus1);
+             else            get_consensus(alignment, rev_seq.c_str(), num_consensus1);
+           }
+
+           if(PE_direction == 2) {
+
+             if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus2);
+             else            get_consensus(alignment, rev_seq.c_str(), num_consensus2);
+
+           }
+
+           value += valuebytes[i];
+       }
+   }
+
+   if( !overlap && (num_deletion_1 > 0) ) {
+
+        ref_sequence_1.assign( data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc1, data->range + num_deletion_1) );
+        len_consen_1 = ref_sequence_1.size();
+
+        free(loc_consensus_1);
+        free(num_consensus1);
+        loc_consensus_1 = (int *) malloc( sizeof(int) * (len_consen_1+1)*2 );
+        num_consensus1  = (int *) malloc( sizeof(int) * (len_consen_1+1) * 4 * 2 );
+
+        for(int i=0; i<len_consen_1*2; i++)   loc_consensus_1[i] = 0;
+        for(int i=0; i<len_consen_1*4*2; i++) num_consensus1[i] = 0; 
+
+        value = multivalue;
+        for(int i=0; i<nvalues; i++) {
+           string head_seq(value);
+           std::size_t pos    = head_seq.find_first_of(" ");
+
+           int PE_direction = 0;
+           std::size_t pe_pos = head_seq.find_first_of("_");
+           if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+           if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+	   if(PE_direction == 1) {
+             int Strand = 0;
+             Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence_1, data->range);
+
+             string seq( head_seq.substr(pos+1,data->range).c_str() );
+             string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+             alignment.Clear();
+
+             if(Strand == 1) aligner.Align(seq.c_str(),     ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+             else            aligner.Align(rev_seq.c_str(), ref_sequence_1.c_str(), len_consen_1, filter, &alignment);
+
+             if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus1);
+             else            get_consensus(alignment, rev_seq.c_str(), num_consensus1);
+           }
+
+           value += valuebytes[i];
+       }
+   }
+
+
+   if( !overlap && (num_deletion_2 > 0) ) {
+
+        ref_sequence_2.assign( data->reference_sequence[LinkID.chr1-1].substr(LinkID.loc2, data->range + num_deletion_2) );
+        len_consen_2 = ref_sequence_2.size();
+
+        free(loc_consensus_2);
+        free(num_consensus2);
+        loc_consensus_2 = (int *) malloc( sizeof(int) * (len_consen_2+1)*2 );
+        num_consensus2  = (int *) malloc( sizeof(int) * (len_consen_2+1) * 4 * 2 );
+
+        for(int i=0; i<len_consen_2*2; i++)   loc_consensus_2[i] = 0;
+        for(int i=0; i<len_consen_2*4*2; i++) num_consensus2[i] = 0;
+
+        value = multivalue;
+        for(int i=0; i<nvalues; i++) {
+           string head_seq(value);
+           std::size_t pos    = head_seq.find_first_of(" ");
+
+           int PE_direction = 0;
+           std::size_t pe_pos = head_seq.find_first_of("_");
+           if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+           if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+	   if(PE_direction == 2) {
+             int Strand = 0;
+             Get_DirectionStrand(head_seq, &PE_direction, &Strand, ref_sequence_2, data->range);
+
+             string seq( head_seq.substr(pos+1,data->range).c_str() );
+             string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+             alignment.Clear();
+
+             if(Strand == 1) aligner.Align(seq.c_str(),     ref_sequence_2.c_str(), len_consen_2, filter, &alignment);
+             else            aligner.Align(rev_seq.c_str(), ref_sequence_2.c_str(), len_consen_2, filter, &alignment);
+
+             if(Strand == 1) get_consensus(alignment, seq.c_str(),     num_consensus2);
+             else            get_consensus(alignment, rev_seq.c_str(), num_consensus2);
+           }
+
+           value += valuebytes[i];
+       }
+   }
+
+}
+
+
+    for(int k=0; k<3; k++) { check_error[k]= 0; check_error_1[k]= 0; check_error_2[k]= 0; }
+    if(overlap) { csequence_1 = check_consensus_sequence( ref_sequence_1.c_str(), check_error, num_consensus1, num_consensus2, len_consen_1, num_sp1, num_sp2, loc_consensus_1); }
+    else        {
+                  csequence_1 = check_consensus_seq_single( ref_sequence_1.c_str(), check_error_1, num_consensus1, len_consen_1, num_sp1, loc_consensus_1);
+                  csequence_2 = check_consensus_seq_single( ref_sequence_2.c_str(), check_error_2, num_consensus2, len_consen_2, num_sp2, loc_consensus_2);
+    }
+
+    csequence_1 = csequence_1.substr(0,len_consen_1);
+    if(!overlap) csequence_2 = csequence_2.substr(0,len_consen_2);
+
+    value = multivalue;
+    for(int i=0; i<nvalues; i++) {
+       string head_seq(value);
+       std::size_t pos    = head_seq.find_first_of(" ");
+
+       int PE_direction = 0;
+       std::size_t pe_pos = head_seq.find_first_of("_");
+       if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+       if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+       if(PE_direction == 1) {
+
+	 int Strand = 0;
+	 Get_DirectionStrand(head_seq, &PE_direction, &Strand, csequence_1, data->range);
+         string seq( head_seq.substr(pos+1,data->range).c_str() );
+         string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+         alignment.Clear();
+
+         if(Strand == 1) aligner.Align(seq.c_str(),     csequence_1.c_str(), len_consen_1, filter, &alignment);
+         else            aligner.Align(rev_seq.c_str(), csequence_1.c_str(), len_consen_1, filter, &alignment);
+
+         if(Strand == 1) print_reads(data->outFile, alignment, seq,     num_consensus1);
+         else            print_reads(data->outFile, alignment, rev_seq, num_consensus1);
+
+         if(alignment.sw_score > max_score_1) max_score_1 = alignment.sw_score;
+         if(alignment.sw_score < min_score_1) min_score_1 = alignment.sw_score;
+         sw_score_1 += alignment.sw_score;
+
+         data->outFile << " --- " << head_seq.substr(0,pos).c_str() << " " << Strand << endl;
+       }
+
+      value += valuebytes[i];
+    }
+
+    if(!overlap) {
+
+        for(int j=0; j<len_consen_1; j++) {
+          if(loc_consensus_1[j] == 1)       data->outFile << ":";
+          else                              data->outFile << " ";
+        }
+        data->outFile << endl ;
+
+        data->outFile << ref_sequence_1.substr(0,ref_sequence_1.length()).c_str() << endl;
+        data->outFile << csequence_1.substr(0,csequence_1.length()).c_str() << endl;
+        data->outFile << "ID-1::: chr:" << LinkID.chr1 << " " << LinkID.loc1 << " " << LinkID.loc2;
+        data->outFile << " SIZE: " << nvalues << " "  << num_sp1 << " " << check_error_1[0] << " " << check_error_1[1];
+        data->outFile << " " << len_consen_1 << " " << (double)sw_score_1/(double)num_sp1 << " " << min_score_1 << " " << max_score_1 << " " << num_deletion_1 << endl;
+    }
+    data->outFile << endl;
+
+    value = multivalue;
+    for(int i=0; i<nvalues; i++) {
+      string head_seq(value);
+      std::size_t pos = head_seq.find_first_of(" ");
+
+      int PE_direction = 0;
+      std::size_t pe_pos = head_seq.find_first_of("_");
+      if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+      if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+      if(PE_direction == 2) {
+
+	int Strand = 0;	
+        if(overlap) Get_DirectionStrand(head_seq, &PE_direction, &Strand, csequence_1, data->range);
+        else        Get_DirectionStrand(head_seq, &PE_direction, &Strand, csequence_2, data->range);
+
+        string seq( head_seq.substr(pos+1,data->range).c_str() );
+        string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+        alignment.Clear();
+        if(overlap) {
+                if(Strand == 1) aligner.Align(seq.c_str(),     csequence_1.c_str(), len_consen_1, filter, &alignment);
+                else            aligner.Align(rev_seq.c_str(), csequence_1.c_str(), len_consen_1, filter, &alignment);
+        } else {
+                if(Strand == 1) aligner.Align(seq.c_str(),     csequence_2.c_str(), len_consen_2, filter, &alignment);
+                else            aligner.Align(rev_seq.c_str(), csequence_2.c_str(), len_consen_2, filter, &alignment);
+        }
+
+        int32_t start_loc = -1;
+        start_loc = alignment.ref_begin - alignment.query_begin;
+
+        if(Strand == 1) print_reads(data->outFile, alignment, seq,     num_consensus2);
+        else            print_reads(data->outFile, alignment, rev_seq, num_consensus2);
+
+        if(alignment.sw_score > max_score_2) max_score_2 = alignment.sw_score;
+        if(alignment.sw_score < min_score_2) min_score_2 = alignment.sw_score;
+        sw_score_2 += alignment.sw_score;
+        data->outFile << " --- " << head_seq.substr(0,pos).c_str() << " " << Strand << endl;
+
+      }
+
+      value += valuebytes[i];
+    }
+
+    if(overlap) {
+         for(int j=0; j<len_consen_1; j++) {
+           if     (loc_consensus_1[j] == 1)  data->outFile << "|";
+           else if(loc_consensus_1[j] == 2)  data->outFile << ":";
+           else                              data->outFile << " ";
+         }
+
+         data->outFile << endl;
+         data->outFile << ref_sequence_1.substr(0,ref_sequence_1.length()).c_str() << endl;
+         data->outFile << csequence_1.substr(0,csequence_1.length()).c_str() << endl;
+         data->outFile << "ID::: chr:" << LinkID.chr1 << " " << LinkID.loc1 << " " << LinkID.loc2;
+         data->outFile << " SIZE: " << nvalues << " "  << num_sp1+num_sp2 << " " << num_sp1 << " " << num_sp2;
+         data->outFile << " " << check_error[0] << " " << check_error[1] << " " << check_error[2] << " " << len_consen_1;
+         data->outFile << " " << (double)sw_score_1/(double)num_sp1 << " " << (double)sw_score_2/(double)num_sp2;
+         data->outFile << " " << min_score_1 << " " << min_score_2 << " " << max_score_1 << " " << max_score_2 << " " << num_deletion_1 << endl << endl;
+
+    } else {
+          for(int j=0; j<len_consen_2; j++) {
+            if(loc_consensus_2[j] == 1)       data->outFile << ":";
+            else                              data->outFile << " ";
+          }
+
+         data->outFile << endl;
+         data->outFile << ref_sequence_2.substr(0,ref_sequence_2.length()).c_str() << endl;
+         data->outFile << csequence_2.substr(0,csequence_2.length()).c_str() << endl;
+         data->outFile << "ID-2::: chr:" << LinkID.chr1 << " " << LinkID.loc1 << " " << LinkID.loc2;
+         data->outFile << " SIZE: " << nvalues << " "  << num_sp2 << " " << check_error_2[0] << " " << check_error_2[1];
+         data->outFile << " " << len_consen_2 << " " << (double)sw_score_2/(double)num_sp2 << " " << min_score_2 << " " << max_score_2 << " " << num_deletion_2 << endl << endl;
+    }
+
+  } else {
+
+    value = multivalue;
+    for(int i=0; i<nvalues; i++) {
+      string head_seq(value);
+      std::size_t pos    = head_seq.find_first_of(" ");
+
+      int PE_direction = 0;
+      std::size_t pe_pos = head_seq.find_first_of("_");
+      if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+      if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+      string seq(head_seq.substr(pos+1,data->range).c_str() );
+      string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+      if(PE_direction==1) {
+        data->outFile << seq.c_str()     << " --- " << head_seq.substr(0,pos).c_str() << " " << PE_direction << endl;
+        num_sp1++;
+      }
+
+      value += valuebytes[i];
+    }
+
+    value = multivalue;
+    for(int i=0; i<nvalues; i++) {
+      string head_seq(value);
+      std::size_t pos = head_seq.find_first_of(" ");
+
+      int PE_direction = 0;
+      std::size_t pe_pos = head_seq.find_first_of("_");
+      if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+      if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+      string seq(head_seq.substr(pos+1,data->range).c_str() );
+      string rev_seq = revcomp( seq.substr(0,data->range).c_str() );
+
+      if(PE_direction==2) {
+        data->outFile << seq.c_str()     << " --- " << head_seq.substr(0,pos).c_str() << " " << PE_direction << endl;
+        num_sp2++;
+      }
+
+      value += valuebytes[i];
+    }
+
+    data->outFile << endl;
+    data->outFile << "ID-noConsensus::: chr:" << LinkID.chr1 << " " << LinkID.loc1 << " " << LinkID.loc2 << " SIZE: " << nvalues << " "  << num_sp1 << " " << num_sp2 << endl << endl;
+
+  }
+
+  free(check_error);
+  free(check_error_1);
+  free(check_error_2);
+  free(loc_consensus_1);
+  if(!overlap) free(loc_consensus_2);
+  free(num_consensus1);
+  free(num_consensus2);
+
+  END_BLOCK_LOOP
+
+}
+
+
+// ********
+void reduce_assemble_statistics(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr)
+{
+  Data *data = (Data *) ptr;
+  char *value;
+
+  PairID LinkID = *(PairID *) key;
+
+  bool overlap = false;
+  int offset;
+  if(LinkID.loc1 <= LinkID.loc2) offset = LinkID.loc1 + data->range - 1 - LinkID.loc2;
+  else				 offset = LinkID.loc2 + data->range - 1 - LinkID.loc1;
+
+  if( offset > (int)data->kmer_length ) overlap = true;
+
+  IRKE irke_1(data->kmer_length, data->MAX_RECURSION, data->MIN_SEED_ENTROPY, data->MIN_SEED_COVERAGE,
+             data->min_any_entropy, data->PACMAN, data->CRAWL, data->crawl_length, data->DS);
+
+  IRKE irke_2(data->kmer_length, data->MAX_RECURSION, data->MIN_SEED_ENTROPY, data->MIN_SEED_COVERAGE,
+             data->min_any_entropy, data->PACMAN, data->CRAWL, data->crawl_length, data->DS); 
+
+  StripedSmithWaterman::Aligner aligner;
+  StripedSmithWaterman::Filter filter;
+  StripedSmithWaterman::Alignment alignment;
+
+  int num_sp1 = 0;
+  int num_sp2 = 0;
+
+  uint64_t nvalues_total;
+  CHECK_FOR_BLOCKS(multivalue,valuebytes,nvalues,nvalues_total)
+  BEGIN_BLOCK_LOOP(multivalue,valuebytes,nvalues)
+
+   value = multivalue;
+   for(int i=0; i<nvalues; i++) {
+     string head_seq(value);
+     std::size_t pos = head_seq.find_first_of(" ");
+
+     int PE_direction = 0;
+     std::size_t pe_pos = head_seq.find_first_of("_");
+     if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+     if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+     string seq(head_seq.substr(pos+1,data->range).c_str() );
+     string rev_seq = revcomp( seq.substr(0,seq.length()) );
+
+     int nKmer = seq.length() - data->kmer_length + 1;
+     for(int j=0; j<nKmer; j++) {
+
+        string seq_kmer = seq.substr(j, data->kmer_length);
+ 
+        if( contains_non_gatc(seq_kmer) ) {
+            uint64_t kmer_val = kmer_to_intval(seq_kmer);
+	    uint64_t rkmer_val = revcomp_val(kmer_val, data->kmer_length);
+
+            if(overlap) {
+		irke_1.add_kmer(kmer_val , 1);
+		irke_1.add_kmer(rkmer_val , 1);	
+	    } else if(PE_direction == 1) {
+		irke_1.add_kmer(kmer_val , 1);
+		irke_1.add_kmer(rkmer_val , 1);
+	    } else {
+ 	    	irke_2.add_kmer(kmer_val , 1);
+		irke_2.add_kmer(rkmer_val , 1);
+	    }
+
+        }
+
+     }
+
+     value += valuebytes[i];
+   }
+
+  irke_1.prune_some_kmers(data->min_kmer_count, data->min_any_entropy, data->prune_error_kmers, data->min_ratio_non_error);
+  irke_1.populate_sorted_kmers_list();
+
+  string assembled_sequence_1 =
+      irke_1.compute_sequence_assemblies( data->MIN_CONNECTIVITY_RATIO, data->MIN_ASSEMBLY_LENGTH, data->MIN_ASSEMBLY_COVERAGE );
+
+  string assembled_sequence_2;
+  if(!overlap) {
+    irke_2.prune_some_kmers(data->min_kmer_count, data->min_any_entropy, data->prune_error_kmers, data->min_ratio_non_error);
+    irke_2.populate_sorted_kmers_list();
+    assembled_sequence_2 =
+      irke_2.compute_sequence_assemblies( data->MIN_CONNECTIVITY_RATIO, data->MIN_ASSEMBLY_LENGTH, data->MIN_ASSEMBLY_COVERAGE );
+  }
+
+  int *check_error   = (int *) malloc(sizeof(int)*4); 
+  int *check_error_1 = (int *) malloc(sizeof(int)*4);
+  int *check_error_2 = (int *) malloc(sizeof(int)*4);
+
+  std::size_t  len_consen_1 = assembled_sequence_1.length();
+  std::size_t  len_consen_2 = 0;
+  if(!overlap) len_consen_2 = assembled_sequence_2.length();
+
+  int *loc_consensus_1  = (int *) malloc( sizeof(int) * (len_consen_1+1)*2 );
+  int *loc_consensus_2;
+  if(!overlap) loc_consensus_2 = (int *) malloc( sizeof(int) * (len_consen_2+1)*2 ); 
+
+  int *num_consensus1 = (int *) malloc( sizeof(int) * (len_consen_1+1) * 4 * 2 );
+  int *num_consensus2;
+
+  if(overlap) num_consensus2 = (int *) malloc( sizeof(int) * (len_consen_1+1) * 4 * 2 );
+  else	      num_consensus2 = (int *) malloc( sizeof(int) * (len_consen_2+1) * 4 * 2 );  
+
+  for(int i=0; i<len_consen_1*2; i++) loc_consensus_1[i] = 0;
+  if(!overlap)
+    for(int i=0; i<len_consen_2*2; i++) loc_consensus_2[i] = 0;
+
+  for(int i=0; i<len_consen_1*4*2; i++) num_consensus1[i] = 0;
+  if(overlap) {
+	for(int i=0; i<len_consen_1*4*2; i++) num_consensus2[i] = 0;	
+  } else {
+	for(int i=0; i<len_consen_2*4*2; i++) num_consensus2[i] = 0;
+  }
+
+  data->outFile << ">chr:" << LinkID.chr1 << " " << offset << " " << LinkID.loc1 << " " << LinkID.loc2 << " " << len_consen_1 << " " << nvalues << endl; 
+
+  uint64_t min_score_1 = 1000000;
+  uint64_t min_score_2 = 1000000;
+
+  uint64_t max_score_1 = 0;
+  uint64_t max_score_2 = 0;
+
+  uint64_t sw_score_1 = 0;
+  uint64_t sw_score_2 = 0;
+
+  string csequence_1, csequence_2;
+
+  if( (overlap && (len_consen_1 > 0) && (nvalues >= 6)) || (!overlap && (len_consen_1 > 0) && (len_consen_2 > 0) && (nvalues >= 6)) ) {
+
+    value = multivalue;
+    for(int i=0; i<nvalues; i++) {
+       string head_seq(value);
+       std::size_t pos    = head_seq.find_first_of(" ");
+
+       int PE_direction = 0;
+       std::size_t pe_pos = head_seq.find_first_of("_");
+       if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+       if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+
+       int Strand = 0;
+       if(overlap) { Get_DirectionStrand(head_seq, &PE_direction, &Strand, assembled_sequence_1, data->range); }
+       else  {
+	   if(PE_direction == 1) Get_DirectionStrand(head_seq, &PE_direction, &Strand, assembled_sequence_1, data->range);
+	   else			 Get_DirectionStrand(head_seq, &PE_direction, &Strand, assembled_sequence_2, data->range);
+       }    
+
+       string seq( head_seq.substr(pos+1,data->range).c_str() );
+       string rev_seq = revcomp( seq.substr(0,seq.length()) );
+
+       if(PE_direction == 1) {
+         alignment.Clear();
+
+         if(Strand == 1) aligner.Align(seq.c_str(),     assembled_sequence_1.c_str(), len_consen_1, filter, &alignment);
+         else            aligner.Align(rev_seq.c_str(), assembled_sequence_1.c_str(), len_consen_1, filter, &alignment);
+
+         if(Strand == 1) get_consensus(alignment, seq,     num_consensus1);
+         else            get_consensus(alignment, rev_seq, num_consensus1);
+
+	 num_sp1++;
+       }
+
+      if(PE_direction == 2) {
+
+        alignment.Clear();
+        if(overlap) {
+                if(Strand == 1) aligner.Align(seq.c_str(),     assembled_sequence_1.c_str(), len_consen_1, filter, &alignment);
+                else            aligner.Align(rev_seq.c_str(), assembled_sequence_1.c_str(), len_consen_1, filter, &alignment);
+        } else {
+                aligner.Align(rev_seq.c_str(), assembled_sequence_2.c_str(), len_consen_2, filter, &alignment);
+                if(Strand == 1) aligner.Align(seq.c_str(),     assembled_sequence_2.c_str(), len_consen_2, filter, &alignment);
+                else            aligner.Align(rev_seq.c_str(), assembled_sequence_2.c_str(), len_consen_2, filter, &alignment);
+        }
+
+        int32_t start_loc = -1;
+        start_loc = alignment.ref_begin - alignment.query_begin;
+
+        if(Strand == 1) get_consensus(alignment, seq,     num_consensus2);
+        else            get_consensus(alignment, rev_seq, num_consensus2);
+
+	num_sp2++;
+      }
+
+      value += valuebytes[i];
+    }
+
+    for(int k=0; k<3; k++) { check_error[k]= 0; check_error_1[k]= 0; check_error_2[k]= 0; }
+    if(overlap) { csequence_1 = check_consensus_sequence( assembled_sequence_1.c_str(), check_error, num_consensus1, num_consensus2, len_consen_1, num_sp1, num_sp2, loc_consensus_1); }
+    else        {
+	          csequence_1 = check_consensus_seq_single( assembled_sequence_1.c_str(), check_error_1, num_consensus1, len_consen_1, num_sp1, loc_consensus_1);
+	          csequence_2 = check_consensus_seq_single( assembled_sequence_2.c_str(), check_error_2, num_consensus2, len_consen_2, num_sp2, loc_consensus_2);
+    }
+
+    csequence_1 = csequence_1.substr(0,len_consen_1);
+    csequence_2 = csequence_2.substr(0,len_consen_2);
+
+    value = multivalue;
+    for(int i=0; i<nvalues; i++) {
+       string head_seq(value);
+       std::size_t pos    = head_seq.find_first_of(" ");
+
+       int PE_direction = 0;
+       int Strand = 0;
+       Get_DirectionStrand(head_seq, &PE_direction, &Strand, csequence_1, data->range); 
+       string seq( head_seq.substr(pos+1,data->range).c_str() );
+       string rev_seq = revcomp( seq.substr(0,seq.length()) );
+
+       if(PE_direction == 1) {
+	 alignment.Clear();
+
+	 if(Strand == 1) aligner.Align(seq.c_str(),     csequence_1.c_str(), len_consen_1, filter, &alignment);
+	 else   	 aligner.Align(rev_seq.c_str(), csequence_1.c_str(), len_consen_1, filter, &alignment);
+
+         if(Strand == 1) print_reads(data->outFile, alignment, seq,     num_consensus1);
+	 else		 print_reads(data->outFile, alignment, rev_seq, num_consensus1);
+
+	 if(alignment.sw_score > max_score_1) max_score_1 = alignment.sw_score;
+	 if(alignment.sw_score < min_score_1) min_score_1 = alignment.sw_score;
+	 sw_score_1 += alignment.sw_score;
+
+         data->outFile << " --- " << head_seq.substr(0,pos).c_str() << " " << Strand << endl;
+       }
+
+      value += valuebytes[i];
+    }
+
+    if(!overlap) {
+
+        for(int j=0; j<len_consen_1; j++) {
+          if(loc_consensus_1[j] == 1)       data->outFile << ":";
+          else                              data->outFile << " ";
+        }
+        data->outFile << endl ;
+
+        data->outFile << assembled_sequence_1.c_str() << endl;
+        data->outFile << csequence_1.c_str() << endl;
+        data->outFile << "ID-1::: chr:" << LinkID.chr1 << " " << LinkID.loc1 << " " << LinkID.loc2;
+	data->outFile << " SIZE: " << nvalues << " "  << num_sp1 << " " << check_error_1[0] << " " << check_error_1[1];
+	data->outFile << " " << len_consen_1 << " " << (double)sw_score_1/(double)num_sp1 << " " << min_score_1 << " " << max_score_1 << endl;
+    }
+    data->outFile << endl;
+
+    value = multivalue;
+    for(int i=0; i<nvalues; i++) {
+      string head_seq(value);
+      std::size_t pos = head_seq.find_first_of(" ");
+
+      int PE_direction = 0;
+      int Strand = 0;
+      if(overlap) Get_DirectionStrand(head_seq, &PE_direction, &Strand, csequence_1, data->range);
+      else        Get_DirectionStrand(head_seq, &PE_direction, &Strand, csequence_2, data->range); 
+
+      string seq( head_seq.substr(pos+1,data->range).c_str() );
+      string rev_seq = revcomp( seq.substr(0,seq.length()) );
+
+      if(PE_direction == 2) {
+
+        alignment.Clear();
+        if(overlap) {
+		if(Strand == 1) aligner.Align(seq.c_str(),     csequence_1.c_str(), len_consen_1, filter, &alignment);
+		else		aligner.Align(rev_seq.c_str(), csequence_1.c_str(), len_consen_1, filter, &alignment);
+        } else {
+		if(Strand == 1) aligner.Align(seq.c_str(),     csequence_2.c_str(), len_consen_2, filter, &alignment);
+	        else		aligner.Align(rev_seq.c_str(), csequence_2.c_str(), len_consen_2, filter, &alignment);
+	}
+
+        int32_t start_loc = -1;
+        start_loc = alignment.ref_begin - alignment.query_begin;
+
+        if(Strand == 1) print_reads(data->outFile, alignment, seq,     num_consensus2); 
+	else		print_reads(data->outFile, alignment, rev_seq, num_consensus2);
+
+        if(alignment.sw_score > max_score_2) max_score_2 = alignment.sw_score;
+        if(alignment.sw_score < min_score_2) min_score_2 = alignment.sw_score;
+	sw_score_2 += alignment.sw_score;
+        data->outFile << " --- " << head_seq.substr(0,pos).c_str() << " " << Strand << endl;
+
+      }
+      value += valuebytes[i];
+    }  
+
+    if(overlap) {
+         for(int j=0; j<len_consen_1; j++) {
+           if     (loc_consensus_1[j] == 1)  data->outFile << "|";
+           else if(loc_consensus_1[j] == 2)  data->outFile << ":";
+           else                              data->outFile << " ";
+         }
+  
+         data->outFile << endl;
+         data->outFile << assembled_sequence_1.c_str() << endl;
+	 data->outFile << csequence_1.c_str() << endl;
+         data->outFile << "ID::: chr:" << LinkID.chr1 << " " << LinkID.loc1 << " " << LinkID.loc2;
+	 data->outFile << " SIZE: " << nvalues << " "  << num_sp1+num_sp2 << " " << num_sp1 << " " << num_sp2;
+	 data->outFile << " " << check_error[0] << " " << check_error[1] << " " << check_error[2] << " " << len_consen_1;
+	 data->outFile << " " << (double)sw_score_1/(double)num_sp1 << " " << (double)sw_score_2/(double)num_sp2;
+	 data->outFile << " " << min_score_1 << " " << min_score_2 << " " << max_score_1 << " " << max_score_2 << " " << endl << endl;
+
+    } else {
+          for(int j=0; j<len_consen_2; j++) {
+            if(loc_consensus_2[j] == 1)       data->outFile << ":";
+            else                              data->outFile << " ";
+          }
+
+         data->outFile << endl;
+         data->outFile << assembled_sequence_2.c_str() << endl; 
+	 data->outFile << csequence_2.c_str() << endl;
+         data->outFile << "ID-2::: chr:" << LinkID.chr1 << " " << LinkID.loc1 << " " << LinkID.loc2;
+	 data->outFile << " SIZE: " << nvalues << " "  << num_sp2 << " " << check_error_2[0] << " " << check_error_2[1];
+	 data->outFile << " " << len_consen_2 << " " << (double)sw_score_2/(double)num_sp2 << " " << min_score_2 << " " << max_score_2 << endl << endl;
+    }
+
+  } else {
+
+    value = multivalue;
+    for(int i=0; i<nvalues; i++) {
+      string head_seq(value);
+      std::size_t pos    = head_seq.find_first_of(" ");
+
+      int PE_direction = 0;
+      std::size_t pe_pos = head_seq.find_first_of("_");
+      if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+      if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+//      int Strand = 0;
+//      Get_DirectionStrand(head_seq, &PE_direction, &Strand);
+
+      string seq(head_seq.substr(pos+1,data->range).c_str() );
+      string rev_seq = revcomp( seq.substr(0,seq.length()) );
+
+      if(PE_direction==1) {
+	data->outFile << seq.c_str()     << " --- " << head_seq.substr(0,pos).c_str() << " " << PE_direction << endl;
+//      if(Strand == 1) data->outFile << seq.c_str()     << " --- " << head_seq.substr(0,pos).c_str() << " " << PE_direction << endl;
+//	else		data->outFile << rev_seq.c_str() << " --- " << head_seq.substr(0,pos).c_str() << " " << PE_direction << endl;
+	num_sp1++;
+      }
+
+      value += valuebytes[i];
+    }
+
+    value = multivalue;
+    for(int i=0; i<nvalues; i++) {
+      string head_seq(value);
+      std::size_t pos = head_seq.find_first_of(" ");
+
+      int PE_direction = 0;
+      std::size_t pe_pos = head_seq.find_first_of("_");
+      if( head_seq.compare(pe_pos+1,1,"1") == 0 ) PE_direction = 1;
+      if( head_seq.compare(pe_pos+1,1,"2") == 0 ) PE_direction = 2;
+//      int Strand = 0;
+//      Get_DirectionStrand(head_seq, &PE_direction, &Strand);
+
+      string seq(head_seq.substr(pos+1,data->range).c_str() );
+      string rev_seq = revcomp( seq.substr(0,seq.length()) );
+
+      if(PE_direction==2) {
+	data->outFile << seq.c_str()     << " --- " << head_seq.substr(0,pos).c_str() << " " << PE_direction << endl;
+//      if(Strand == 1) data->outFile << seq.c_str()     << " --- " << head_seq.substr(0,pos).c_str() << " " << PE_direction << endl;
+//	else	        data->outFile << rev_seq.c_str() << " --- " << head_seq.substr(0,pos).c_str() << " " << PE_direction << endl;
+	num_sp2++;
+      }
+
+      value += valuebytes[i];
+    }    
+
+    data->outFile << endl;
+    data->outFile << "ID-noConsensus::: chr:" << LinkID.chr1 << " " << LinkID.loc1 << " " << LinkID.loc2 << " SIZE: " << nvalues << " "  << num_sp1 << " " << num_sp2 << endl << endl;
+  }
+
+  free(check_error);
+  free(check_error_1);
+  free(check_error_2);
+  free(loc_consensus_1);
+  if(!overlap) free(loc_consensus_2);
+  free(num_consensus1);
+  free(num_consensus2);
+
+  END_BLOCK_LOOP
+
+}
+
+void Get_DirectionStrand(string head_seq, int *PE_direction, int *Strand, string ref_seq, int data_range)
+{
+  std::size_t pe_pos = head_seq.find_first_of("_");
+  if( head_seq.compare(pe_pos+1,1,"1") == 0 ) *PE_direction = 1;
+  if( head_seq.compare(pe_pos+1,1,"2") == 0 ) *PE_direction = 2;
+
+  StripedSmithWaterman::Aligner aligner;
+  StripedSmithWaterman::Filter filter;
+  StripedSmithWaterman::Alignment alignment_1;
+  StripedSmithWaterman::Alignment alignment_2;
+
+  std::size_t pos = head_seq.find_first_of(" ");
+  string seq( head_seq.substr(pos+1,data_range).c_str() );
+  string rev_seq = revcomp( head_seq.substr(pos+1,data_range) );
+
+  alignment_1.Clear();
+  aligner.Align(seq.c_str(),     ref_seq.c_str(), ref_seq.length(), filter, &alignment_1);
+  alignment_2.Clear();
+  aligner.Align(rev_seq.c_str(), ref_seq.c_str(), ref_seq.length(), filter, &alignment_2);
+
+  if( alignment_1.sw_score > alignment_2.sw_score ) *Strand = 1;
+  else  					    *Strand = 2; 
+}
+
+int check_num_match(StripedSmithWaterman::Alignment alignment)
+{
+  int32_t *bam_cigar = (int32_t *) malloc( sizeof(int32_t)*3 );
+
+  int num_match = 0;
+  for(size_t j = 0; j < alignment.cigar.size(); j++)  {
+     convert_cigar2bam(alignment.cigar[j], bam_cigar);	
+     if( (bam_cigar[0] == 0) || (bam_cigar[0] == 7) ) num_match += (int)bam_cigar[1];  
+    // if(bam_cigar[0] == 7) num_match += (int)bam_cigar[1]; 
+  }
+  free(bam_cigar);
+
+  return num_match;
+}
+
+void get_consensus(StripedSmithWaterman::Alignment alignment, string seq, int *num_consensus)
+{
+        if( (alignment.ref_begin - alignment.query_begin) >= 0 ) {
+             if(alignment.query_begin > 0) {
+		    for(int j=0; j<(int)alignment.query_begin; j++) {
+                       int intBase = get_int_from_base( seq.substr(0,(int)alignment.query_begin).c_str()[j] );
+                       if((intBase>=0) && (intBase < 4)) num_consensus[ ((int)(alignment.ref_begin - alignment.query_begin) + j)*4 + intBase ]++;
+                    }
+             }
+       } else {
+          int ss = (int)(alignment.query_begin - alignment.ref_begin);
+          for(int j=0; j<(int)alignment.ref_begin; j++) {
+                int intBase = get_int_from_base( seq.substr(ss,alignment.ref_begin).c_str()[j] );
+                if((intBase>=0) && (intBase < 4)) num_consensus[ j*4 + intBase ]++;
+          }
+       }    
+
+       int32_t *bam_cigar = (int32_t *) malloc( sizeof(int32_t)*3 );
+
+       int sp     = (int)alignment.query_begin;
+       int sp_loc = (int)alignment.ref_begin;
+       for(size_t j = 0; j < alignment.cigar.size(); j++)  {
+         convert_cigar2bam(alignment.cigar[j], bam_cigar);
+
+         if( (bam_cigar[0] == 0) || (bam_cigar[0] == 7) || (bam_cigar[0] == 8) ) {
+
+                for(int k=0; k<(int)bam_cigar[1]; k++) {
+                        int intBase = get_int_from_base( seq.substr(sp,(int)bam_cigar[1]).c_str()[k] );
+                        if((intBase>=0) && (intBase < 4)) num_consensus[ (sp_loc + k)*4 + intBase ]++;
+                }
+
+                sp     += (int)bam_cigar[1];
+                sp_loc += (int)bam_cigar[1];
+
+         } else if( bam_cigar[0] == 2 )  {
+                sp_loc += (int)bam_cigar[1];
+         } else if( bam_cigar[0] == 1) {
+
+                sp     += (int)bam_cigar[1];
+         }
+
+       }
+
+       if(bam_cigar[0] == 4) {
+          for(int k=0; k<(int)bam_cigar[1]; k++) {
+                        int intBase = get_int_from_base( seq.substr(sp,(int)bam_cigar[1]).c_str()[k] );
+                        if((intBase>=0) && (intBase < 4)) num_consensus[ (sp_loc + k)*4 + intBase ]++;
+          }
+       }
+
+       free(bam_cigar);
+}
+
+string get_cleanRead(const char *consen_seq, StripedSmithWaterman::Alignment alignment, string seq, int *len)
+{
+   char *cleanRead = (char *) malloc( *len * sizeof(char) ); 
+   int tlen = 0;
+
+   if( (alignment.ref_begin - alignment.query_begin) >= 0 ) {
+
+      tlen += (int)alignment.query_begin;
+      for(int j=0; j<(int)alignment.query_begin; j++) 
+	cleanRead[j] = consen_seq[(int)(alignment.ref_begin - alignment.query_begin)+j]; 	
+
+   } else {
+      
+       int ss = (int)(alignment.query_begin - alignment.ref_begin);
+       tlen += ss;
+       for(int j=0; j<ss; j++) cleanRead[j] = seq.substr(0,ss).c_str()[j];        
+       tlen += (int)alignment.ref_begin;
+       for(int j=0; j<(int)alignment.ref_begin; j++) cleanRead[ss+j] = consen_seq[j];  
+
+   }
+
+   int32_t *bam_cigar = (int32_t *) malloc( sizeof(int32_t)*3 );
+
+   int sp     = (int)alignment.query_begin;
+   int sp_loc = (int)alignment.ref_begin;
+   for(size_t j = 0; j < alignment.cigar.size(); j++)  {
+         convert_cigar2bam(alignment.cigar[j], bam_cigar);
+	 if( (bam_cigar[0] == 0) || (bam_cigar[0] == 7) || (bam_cigar[0] == 8) ) {
+	    tlen += (int)bam_cigar[1];
+	    for(int k=0; k<(int)bam_cigar[1]; k++) cleanRead[sp + k] = consen_seq[sp_loc + k];
+            sp     += (int)bam_cigar[1];
+            sp_loc += (int)bam_cigar[1];
+
+         } else if( bam_cigar[0] == 2 )  {
+                sp_loc += (int)bam_cigar[1];
+         }
+
+   }
+
+   if(bam_cigar[0] == 4) {
+      tlen += (int)bam_cigar[1];
+      for(int k=0; k<(int)bam_cigar[1]; k++) 
+		 cleanRead[sp + k] = consen_seq[sp_loc + k];
+   }
+
+   char *tmp_array = (char *) malloc( sizeof(char)*tlen ); 
+
+   memcpy(tmp_array, cleanRead, tlen);
+ 
+   string out_read( tmp_array ); 
+   *len = tlen;
+
+   free(cleanRead); 
+   free(tmp_array);
+   free(bam_cigar);
+
+   return( out_read.substr(0,tlen).c_str() );
+
+}
+
+void print_reads(std::ofstream &outFile, StripedSmithWaterman::Alignment alignment, string seq, int *num_consensus)
+{
+
+       if( (alignment.ref_begin - alignment.query_begin) >= 0 ) {
+             for(int j=0; j<abs( (int)(alignment.ref_begin-alignment.query_begin) ); j++) outFile << " ";
+             if(alignment.query_begin > 0) {
+                    outFile << seq.substr(0,(int)alignment.query_begin).c_str();
+                    
+       		      for(int j=0; j<(int)alignment.query_begin; j++) {  
+	                  int intBase = get_int_from_base( seq.substr(0,(int)alignment.query_begin).c_str()[j] );
+                          if(intBase < 4) num_consensus[ ((int)(alignment.ref_begin - alignment.query_begin) + j)*4 + intBase ]++;
+                      }
+             }
+
+	} else {
+          int ss = (int)(alignment.query_begin - alignment.ref_begin);
+          outFile << seq.substr(ss,alignment.ref_begin).c_str();
+          
+          for(int j=0; j<(int)alignment.ref_begin; j++) {
+                int intBase = get_int_from_base( seq.substr(ss,alignment.ref_begin).c_str()[j] );
+                if(intBase < 4) num_consensus[ j*4 + intBase ]++;
+          }
+       }
+
+       int32_t *bam_cigar = (int32_t *) malloc( sizeof(int32_t)*3 );
+
+       int sp     = (int)alignment.query_begin;
+       int sp_loc = (int)alignment.ref_begin;
+       for(size_t j = 0; j < alignment.cigar.size(); j++)  {
+         convert_cigar2bam(alignment.cigar[j], bam_cigar);
+
+         if( (bam_cigar[0] == 0) || (bam_cigar[0] == 7) || (bam_cigar[0] == 8) ) {
+                outFile << seq.substr(sp,(int)bam_cigar[1]).c_str();
+                
+                for(int k=0; k<(int)bam_cigar[1]; k++) {
+                        int intBase = get_int_from_base( seq.substr(sp,(int)bam_cigar[1]).c_str()[k] );
+                        if(intBase < 4) num_consensus[ (sp_loc + k)*4 + intBase ]++;
+                }
+
+                sp     += (int)bam_cigar[1];
+                sp_loc += (int)bam_cigar[1];
+
+         } else if( bam_cigar[0] == 2 )  {
+                for(int k=0; k<(int)bam_cigar[1]; k++) outFile << "-";
+                sp_loc += (int)bam_cigar[1];
+         } else if( bam_cigar[0] == 1) {
+
+		for(int k=0; k<(int)bam_cigar[1]; k++) {
+                        int intBase = get_int_from_base( seq.substr(sp,(int)bam_cigar[1]).c_str()[k] );
+                        if(intBase < 4) num_consensus[ (sp_loc + k)*4 + intBase ]++;
+                }
+
+                sp     += (int)bam_cigar[1];
+		sp_loc += (int)bam_cigar[1];
+         }
+
+       }
+
+       if(bam_cigar[0] == 4) {
+          outFile << seq.substr(sp,bam_cigar[1]);
+          
+          for(int k=0; k<(int)bam_cigar[1]; k++) {
+                        int intBase = get_int_from_base( seq.substr(sp,(int)bam_cigar[1]).c_str()[k] );
+                        if(intBase < 4) num_consensus[ (sp_loc + k)*4 + intBase ]++;
+          }
+       }
+
+       free(bam_cigar);
+}
+
+
+int check_deletion_consensus(int *num_consensus1, int *num_consensus2, int len_consensus, int num_sp1, int num_sp2)
+{
+  int threshold1 = (int) floor(num_sp1 * 0.35);
+  int threshold2 = (int) floor(num_sp2 * 0.35);
+  int num_deletion = 0;
+
+  for(int i=0; i<len_consensus; i++) {
+
+      int num1 = 0;
+      int num2 = 0; 
+
+      for(int j=0; j<4; j++) {
+        num1 += num_consensus1[i*4+j];
+        num2 += num_consensus2[i*4+j]; 
+      }
+
+      if( (num1 <= threshold1) && (num2 <= threshold2) ) num_deletion++; 
+
+  }
+
+  return (num_deletion);
+}
+
+int check_deletion_consensus_single(int *num_consensus, int len_consensus, int num_sp)
+{
+  int threshold = (int) floor(num_sp * 0.35);
+  int num_deletion = 0;
+  for(int i=0; i<len_consensus; i++) {
+      int num = 0;
+      for(int j=0; j<4; j++) num += num_consensus[i*4+j];
+      if( num <= threshold ) num_deletion++;
+  }
+  return (num_deletion);
+
+}
+
+
+void check_base_contrast(int *base_contrast, int *depth, const char *ref_seq, int *num_consensus1, int *num_consensus2, int len_consensus, int num_sp1, int num_sp2, int * loc_consensus)
+{
+
+  int *buffer = (int *) malloc( sizeof(int) * 5 );
+
+  for(int i=0; i<len_consensus; i++) { depth[i] = 0; base_contrast[i] = 0; loc_consensus[i] = 0; }
+  for(int i=0; i<len_consensus; i++) {
+
+      int num = 0;
+      for(int j=0; j<4; j++)  buffer[j] = 0;
+      for(int j=0; j<4; j++) {
+        if(num_consensus1[i*4+j] > 0) buffer[j] += num_consensus1[i*4+j];
+        if(num_consensus2[i*4+j] > 0) buffer[j] += num_consensus2[i*4+j];
+        num += buffer[j];
+      }          
+
+      int ind = -1;
+      int max = 0;
+      for(int j=0; j<4; j++) {
+        if(buffer[j] > max) { ind = j; max = buffer[j]; }
+      }
+
+     if( ((num - max) > 0) && (ind > 0) ) {
+	base_contrast[i] = max;
+	depth[i]         = num;
+	loc_consensus[i] = 1;
+     }
+  }
+
+}
+
+
+string check_consensus_sequence(const char *ref_seq, int *check_error, int *num_consensus1, int *num_consensus2, int len_consensus, int num_sp1, int num_sp2, int * loc_consensus) 
+{
+  char _int_to_base [4] = {'G', 'A', 'T', 'C'};
+  char *consen_seq = (char *) malloc( sizeof(char)*len_consensus );
+
+  int threshold = num_sp1-1; 
+  int *buffer = (int *) malloc( sizeof(int) * 5 );
+
+  for(int i=0; i<len_consensus; i++) {
+
+      int num = 0;
+      for(int j=0; j<4; j++)  buffer[j] = 0;
+      for(int j=0; j<4; j++) {
+	if(num_consensus1[i*4+j] > 0) buffer[j] += num_consensus1[i*4+j];
+	if(num_consensus2[i*4+j] > 0) buffer[j] += num_consensus2[i*4+j]; 
+	num += buffer[j];
+      }
+
+      int ind = -1;
+      int max = 0;
+      for(int j=0; j<4; j++) {
+        if(buffer[j] > max) { ind = j; max = buffer[j]; }
+      }
+
+      if(ind >= 0) consen_seq[i] = _int_to_base[ind];
+      else         consen_seq[i] = 'N';
+
+      if( ((num-max)>0) && (max > 0) && (num > 0) && (ind >= 0) ) {
+                check_error[2] += (num - buffer[ind]);
+                check_error[1]++; loc_consensus[i] = 2;
+      }
+
+  }
+
+  string csequence( consen_seq );
+  free(consen_seq);
+  free(buffer);
+  return ( csequence.substr(0,len_consensus).c_str() );
+}
+
+string check_consensus_seq_single(const char *ref_seq, int *check_error, int *num_consensus, int len_consensus, int num_sp, int *loc_consensus)
+{
+  char _int_to_base [4] = {'G', 'A', 'T', 'C'};
+  char *consen_seq = (char *) malloc( sizeof(char)*len_consensus );
+
+  int threshold = 1;
+
+  for(int i=0; i<len_consensus; i++) {
+
+      int ind = 0;
+      int max = num_consensus[i*4];
+
+      for(int j=1; j<4; j++) {
+        if(num_consensus[i*4+j] > max) { ind = j; max = num_consensus[i*4+j]; }
+      }
+
+      int num = 0;
+      for(int j=0; j<4; j++) num += num_consensus[i*4+j];
+
+      if(num > 0) {
+        consen_seq[i] = _int_to_base[ind];
+        if( (max < num) && ((num - num_consensus[i*4+ind])>0) ) {
+		check_error[1] += (num - num_consensus[i*4+ind]);
+		check_error[0]++; loc_consensus[i] = 1;
+	}
+      } else {
+	consen_seq[i] = ref_seq[i];
+      }
+
+  }
+  string csequence( consen_seq );
+  free(consen_seq);
+  return ( csequence.substr(0,len_consensus).c_str() );
+}
+
+void reduce_statistics(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr)
+{
+   Data *data = (Data *) ptr; 
+   EDGE *pair = (EDGE *) key; 
+   data->outFile << pair->loc << " " << pair->vi << " " << pair->vj << " " << nvalues << endl;    
+}
+
+
+void reduce_TargetRegion(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr)
+{
+  Data *data = (Data *) ptr;
+  PairID LinkID = *(PairID *) key;
+
+  std::string filename(data->filename);
+
+  std::vector<ExonLoc>     _target_loc;
+  std::vector<std::string> _target_gene;
+  
+//  int loc_vector = 0;
+//  FILE* FS;
+//  FS = fopen(filename.c_str(), "r");
+
+//  while (!feof(FS)) {
+//    char temp_string[300];
+//    fgets(temp_string, 300, FS);
+
+//    char dummy[5];
+//    char gene[15];
+//    ExonLoc _loc_info;
+
+//    int n = sscanf(temp_string, "%s %llu %llu %s", dummy, &_loc_info.loc1, &_loc_info.loc2, gene);
+//    if(n < 4) break;
+
+//    _loc_info.chr = 0;
+//    if(      strcmp(dummy, "chr1") == 0) _loc_info.chr = 1;
+//    else if( strcmp(dummy, "chr2") == 0) _loc_info.chr = 2;
+//    else if( strcmp(dummy, "chr3") == 0) _loc_info.chr = 3;
+//    else if( strcmp(dummy, "chr4") == 0) _loc_info.chr = 4;
+//    else if( strcmp(dummy, "chr5") == 0) _loc_info.chr = 5;
+//    else if( strcmp(dummy, "chr6") == 0) _loc_info.chr = 6;
+//    else if( strcmp(dummy, "chr7") == 0) _loc_info.chr = 7;
+//    else if( strcmp(dummy, "chr8") == 0) _loc_info.chr = 8;
+//    else if( strcmp(dummy, "chr9") == 0) _loc_info.chr = 9;
+//    else if( strcmp(dummy,"chr10") == 0) _loc_info.chr = 10;
+//    else if( strcmp(dummy,"chr11") == 0) _loc_info.chr = 11;
+//    else if( strcmp(dummy,"chr12") == 0) _loc_info.chr = 12;
+//    else if( strcmp(dummy,"chr13") == 0) _loc_info.chr = 13;
+//    else if( strcmp(dummy,"chr14") == 0) _loc_info.chr = 14;
+//    else if( strcmp(dummy,"chr15") == 0) _loc_info.chr = 15;
+//    else if( strcmp(dummy,"chr16") == 0) _loc_info.chr = 16;
+//    else if( strcmp(dummy,"chr17") == 0) _loc_info.chr = 17;
+//    else if( strcmp(dummy,"chr18") == 0) _loc_info.chr = 18;
+//    else if( strcmp(dummy,"chr19") == 0) _loc_info.chr = 19;
+//    else if( strcmp(dummy,"chr20") == 0) _loc_info.chr = 20;
+//    else if( strcmp(dummy,"chr21") == 0) _loc_info.chr = 21;
+//    else if( strcmp(dummy,"chr22") == 0) _loc_info.chr = 22;
+//    else if( strcmp(dummy, "chrX") == 0) _loc_info.chr = 23;
+//    else if( strcmp(dummy, "chrY") == 0) _loc_info.chr = 24;
+//    else if( strcmp(dummy, "chrM") == 0) _loc_info.chr = 25;
+
+//    if( (_loc_info.chr >= 1) && (_loc_info.chr <= 25) ) {
+//	string gname(gene);
+//        gname = remove_whitespace(gname);
+//	_target_gene.push_back(gname);
+//	_target_loc.push_back(_loc_info);
+//	loc_vector++;	
+//    }
+//  }
+
+//  fclose(FS);
+
+  
+  for(int i=0; i<data->_target_loc.size(); i++) {
+    ExonLoc _locInfo = data->_target_loc.at(i);
+    if( ( (LinkID.loc1 >= _locInfo.loc1) && ( (LinkID.loc1+data->range-1) <= _locInfo.loc2) ) && 
+	( (LinkID.loc2 >= _locInfo.loc1) && ( (LinkID.loc2+data->range-1) <= _locInfo.loc2) ) && 
+	  (LinkID.chr1 == _locInfo.chr)  &&   (LinkID.chr2      == _locInfo.chr)  
+      ) 
+     {
+//	_locInfo.num = nvalues;
+//	string _gname = _target_gene.at(i);
+//	kv->add((char *) _gname.substr(0,_gname.length()).c_str(), sizeof(char)*_gname.length(), (char *) &_locInfo, sizeof(LocInfo));
+        kv->add((char *) &_locInfo, sizeof(ExonLoc), (char *) &nvalues, sizeof(int));
+
+    }
+  }
+
+}
+
+void reduce_onTarget_Exon(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr)
+{
+  Data *data = (Data *) ptr;
+  ExonLoc *locInfo = (ExonLoc *) key;
+
+  char *value;
+  int nreads = 0;
+  int molecules = 0;
+
+  uint64_t nvalues_total;
+  CHECK_FOR_BLOCKS(multivalue,valuebytes,nvalues,nvalues_total)
+  BEGIN_BLOCK_LOOP(multivalue,valuebytes,nvalues)
+
+  value = multivalue;
+  for(int i=0; i<nvalues; i++) {
+    int nr = *(int *) value;
+    if(nr >= 6) {
+	nreads += nr; 
+	molecules++;
+    }
+    value += valuebytes[i];
+  } 
+
+  END_BLOCK_LOOP 
+
+//  data->outFile << locInfo->chr << " " << locInfo->loc1 << " " << locInfo->loc2 << " " << nvalues << " " << nreads << endl;
+  if(molecules > 0)
+	data->outFile << locInfo->chr << " " << locInfo->loc1 << " " << locInfo->loc2 << " " << molecules << " " << nreads << endl;
+
+
+}
+
+
+void reduce_TargetRegion_Statistics(char *key, int keybytes, char *multivalue, int nvalues, int *valuebytes, KeyValue *kv, void *ptr)
+{
+  Data *data = (Data *) ptr;
+  string Gene(key);
+  char *value;
+
+  map<uint64_t,uint64_t> loc;
+  map<uint64_t,int>      loc_num;
+  map<uint64_t,int>      loc_cover;
+  int Chr;
+
+  map<uint64_t,uint64_t>::iterator it_loc;
+
+  uint64_t nvalues_total;
+  CHECK_FOR_BLOCKS(multivalue,valuebytes,nvalues,nvalues_total)
+  BEGIN_BLOCK_LOOP(multivalue,valuebytes,nvalues)
+
+  value = multivalue;
+  for(int i=0; i<nvalues; i++) {
+    LocInfo *loc_info = (LocInfo *) value;
+
+    loc[loc_info->loc1] = loc_info->loc2;
+    loc_num[loc_info->loc1] += 1; 
+//    loc_cover[loc_info->loc1] += loc_info->num;
+   
+    Chr = loc_info->chr;
+
+    value += valuebytes[i];
+  }
+
+  END_BLOCK_LOOP 
+
+  for(it_loc = loc.begin(); it_loc != loc.end(); ++it_loc) {
+        data->outFile << Gene.substr(0,keybytes).c_str() << " " << "chr:" << Chr << " " << it_loc->first << " " << it_loc->second;
+	data->outFile << " " << loc_num[it_loc->first] << " " << loc_cover[it_loc->first] << endl;
+  }
+
+}

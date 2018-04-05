@@ -1,0 +1,27 @@
+# MPI-based makefile using mpic++ and mpicc
+
+MR_INC = /home/ckim/LIBs/mrmpi-7Apr14/src
+MR_LIB = /home/ckim/LIBs/mrmpi-7Apr14/src/libmrmpi_mpicc.a
+
+StatGen_LIB = ../libStatGen/libStatGen.a
+StatGen_Debug_LIB = ../libStatGen/libStatGen_debug.a
+StatGen_Profile_LIB = ../libStatGen/libStatGen_profile.a
+
+StatGen_INC = ../libStatGen/include
+
+Zlib_INC = /apps/modules/pkg/libs/zlib/1.2.8/gcc-4.4.7/include/
+Zlib_LIB = /apps/modules/pkg/libs/zlib/1.2.8/gcc-4.4.7/lib/libz.a 
+
+CC =		mpic++
+CXX =		mpic++ 
+CCFLAGS =	-std=c++0x -m64 -g -O3 -fopenmp -Wno-long-long -Wno-deprecated -Wliteral-suffix -I$(MR_INC) -I$(StatGen_INC) -I$(Zlib_INC)
+LINK =		mpic++
+LINKFLAGS =	-std=c++0x -m64 -g -O3 -fopenmp -Wno-long-long -Wno-deprecated -Wliteral-suffix
+USRLIB_0 =	$(MR_LIB) 
+USRLIB_1 = 	$(StatGen_LIB) 
+USRLIB_2 =	$(StatGen_Debug_LIB)
+USRLIB_3 =	$(StatGen_Profile_LIB)
+USRLIB_4 = 	$(Zlib_LIB) 
+SYSLIB =
+
+include Makefile.common

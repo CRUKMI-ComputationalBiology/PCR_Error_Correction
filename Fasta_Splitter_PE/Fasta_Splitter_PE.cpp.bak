@@ -1,0 +1,386 @@
+/*
+  Copyright (C) 2017, Cancer Research UK Manchester Institute
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+
+#include <mpi.h>
+
+#include <stdio.h>
+#include <iostream>
+#include <string>
+#include <cstring>
+#include <sstream>
+#include <algorithm>
+#include <map>
+#include <fstream>
+
+//#include "CommandLineParser.h"
+//#include "FileParser.h"
+//#include "mutil.h"
+#include "argProcessor.hpp"
+
+#ifndef BIG_FILE_DEFINES_H
+#define BIG_FILE_DEFINES_H
+
+#ifdef __linux
+     #ifndef _LARGEFILE64_SOURCE
+     #define _LARGEFILE64_SOURCE
+     #endif
+     #define _FILE_OFFSET_BITS 64
+     #define STAT_NAME stat64
+#else
+     #define STAT_NAME stat
+#endif
+
+#endif //BIG_FILE_DEFINES_H
+
+void Execute_command(const char * command) {
+    int ret = system(command);
+    if (ret != 0) {
+        cout << "COMMAND: " << command << endl;
+        cout << "Died with exit code " << ret << endl;
+        cout << "Exiting." << endl;
+        exit(-1);
+    }
+}
+
+unsigned long long exec(const char * cmd) {
+    FILE* pipe = popen(cmd, "r");
+    if(!pipe) return(-1);
+    char buffer[128];
+    unsigned long long result;
+    while(!feof(pipe)) {
+    	if(fgets(buffer, 128, pipe) != NULL)
+		sscanf(buffer, "%llu", &result);
+    }
+    pclose(pipe);
+    return result;
+}
+
+//static unsigned long long MAX_CLUSTER_SIZE = 5000;
+
+using namespace std;
+
+int main (int argc, char* argv[]) {
+
+   int rank,numranks;
+   MPI_Init(&argc,&argv);
+   MPI_Comm_size(MPI_COMM_WORLD, &numranks);
+   MPI_Comm_rank(MPI_COMM_WORLD,&rank);
+
+   stringstream cmdstr, cmd_out;
+
+  string readFile1, readFile2, readFile3, readFile4;
+  string headerFile1, headerFile2, headerFile3, headerFile4;
+  string sKmerDir, typeFile;
+  int PE;
+
+  try {
+       ArgProcessor in_args(argc, argv);
+
+       if(in_args.isArgSet("-r1")) {
+            readFile1 = in_args.getStringVal("-r1");
+       }
+
+       if(in_args.isArgSet("-r2")) {
+            readFile2 = in_args.getStringVal("-r2");
+       }
+
+       if(in_args.isArgSet("-r3")) {
+            readFile3 = in_args.getStringVal("-r3");
+       }
+
+       if(in_args.isArgSet("-r4")) {
+            readFile4 = in_args.getStringVal("-r4");
+       }
+
+       if(in_args.isArgSet("-i1")) {
+            headerFile1 = in_args.getStringVal("-i1");
+       }
+
+       if(in_args.isArgSet("-i2")) {
+            headerFile2 = in_args.getStringVal("-i2");
+       }
+
+       if(in_args.isArgSet("-i3")) {
+            headerFile3 = in_args.getStringVal("-i3");
+       }
+
+       if(in_args.isArgSet("-i4")) {
+            headerFile4 = in_args.getStringVal("-i4");
+       }
+
+       if(in_args.isArgSet("-o")) {
+           sKmerDir = in_args.getStringVal("-o");
+       }
+
+       if(in_args.isArgSet("-t")) {
+           typeFile = in_args.getStringVal("-t");
+       }
+
+       if(in_args.isArgSet("-pe")) {
+            PE = in_args.getIntVal("-pe");
+       }
+
+  }
+
+  catch(exception& e) {
+        cerr << "error: " << e.what() << "\n";
+        return 1;
+  }
+
+   unsigned long long numLine;
+   unsigned long long nlines;
+   unsigned long long remain;
+
+   int *START = (int *) malloc(sizeof(int) * numranks);
+   int *END = (int *) malloc(sizeof(int) * numranks);
+
+   unsigned long long startLine;
+   unsigned long long endLine;
+
+   MPI_Barrier(MPI_COMM_WORLD);
+
+// Lane 1
+
+if(!readFile1.empty()) {
+
+   cmdstr.str("");
+   cmdstr << "wc -l " << headerFile1;
+
+   numLine = exec(cmdstr.str().c_str());
+
+   nlines = numLine / (unsigned long long)numranks;
+   remain = numLine % (unsigned long long)numranks;
+
+   for(unsigned long long i=0; i<(unsigned long long)numranks; i++) {
+	unsigned long long interval = nlines;
+	if(i<remain) { interval++; }	
+
+	if(i == 0) START[i] = 1;
+        else       START[i] = END[i-1] + 1;
+        END[i] = START[i] + interval - 1;
+   }
+
+   cmdstr.str("");
+   cmdstr << "sed '" << START[rank] << "q;d' " << headerFile1;
+
+   startLine = exec(cmdstr.str().c_str());
+
+   if(rank < (numranks-1)) {
+	unsigned long long dummy = END[rank]+1;
+	cmdstr.str("");
+   	cmdstr << "sed '" << dummy << "q;d' " << headerFile1;
+
+	endLine = exec(cmdstr.str().c_str());
+	endLine = endLine - 1;
+
+  } else {
+        cmdstr.str("");
+        cmdstr << "wc -l " << readFile1;
+
+	endLine = exec(cmdstr.str().c_str());
+  }
+
+   cmdstr.str("");
+   cmdstr << "sed '" << startLine << "," << endLine << "p;d' " << readFile1 << " > " << sKmerDir;
+   if(PE == 1)      cmdstr << "/sKmer_1_1_";
+   else if(PE == 2) cmdstr << "/sKmer_1_2_";
+   else if(PE == 0) cmdstr << "/sKmer_1_";
+    
+   cmdstr << rank << "." << typeFile;
+
+   cerr << cmdstr.str() << endl;
+   Execute_command(cmdstr.str().c_str()); 
+   MPI_Barrier(MPI_COMM_WORLD);
+
+}
+
+//  Lane 2
+
+if(!readFile2.empty()) {
+
+   cmdstr.str("");
+   cmdstr << "wc -l " << headerFile2;
+
+   numLine = exec(cmdstr.str().c_str());
+
+   nlines = numLine / (unsigned long long)numranks;
+   remain = numLine % (unsigned long long)numranks;
+
+   for(unsigned long long i=0; i<(unsigned long long)numranks; i++) {
+        unsigned long long interval = nlines;
+        if(i<remain) { interval++; }
+
+        if(i == 0) START[i] = 1;
+        else       START[i] = END[i-1] + 1;
+        END[i] = START[i] + interval - 1;
+   }
+
+
+   cmdstr.str("");
+   cmdstr << "sed '" << START[rank] << "q;d' " << headerFile2;
+
+   startLine = exec(cmdstr.str().c_str());
+
+   if(rank < (numranks-1)) {
+        unsigned long long dummy = END[rank]+1;
+        cmdstr.str("");
+        cmdstr << "sed '" << dummy << "q;d' " << headerFile2;
+
+        endLine = exec(cmdstr.str().c_str());
+        endLine = endLine - 1;
+
+  } else {
+        cmdstr.str("");
+        cmdstr << "wc -l " << readFile2;
+
+        endLine = exec(cmdstr.str().c_str());
+  }
+
+   cmdstr.str("");
+   cmdstr << "sed '" << startLine << "," << endLine << "p;d' " << readFile2 << " > " << sKmerDir;
+   if(PE == 1)      cmdstr << "/sKmer_2_1_";
+   else if(PE == 2) cmdstr << "/sKmer_2_2_";
+   else if(PE == 0) cmdstr << "/sKmer_2_";
+
+   cmdstr << rank << "." << typeFile;
+
+   cerr << cmdstr.str() << endl;
+   Execute_command(cmdstr.str().c_str());
+   MPI_Barrier(MPI_COMM_WORLD);
+}
+
+// Lane 3
+
+if(!readFile3.empty()) {
+
+   cmdstr.str("");
+   cmdstr << "wc -l " << headerFile3;
+
+   numLine = exec(cmdstr.str().c_str());
+
+   nlines = numLine / (unsigned long long)numranks;
+   remain = numLine % (unsigned long long)numranks;
+
+
+   for(unsigned long long i=0; i<(unsigned long long)numranks; i++) {
+        unsigned long long interval = nlines;
+        if(i<remain) { interval++; }
+
+        if(i == 0) START[i] = 1;
+        else       START[i] = END[i-1] + 1;
+        END[i] = START[i] + interval - 1;
+   }
+
+   cmdstr.str("");
+   cmdstr << "sed '" << START[rank] << "q;d' " << headerFile3;
+
+   startLine = exec(cmdstr.str().c_str());
+
+   if(rank < (numranks-1)) {
+        unsigned long long dummy = END[rank]+1;
+        cmdstr.str("");
+        cmdstr << "sed '" << dummy << "q;d' " << headerFile3;
+
+        endLine = exec(cmdstr.str().c_str());
+        endLine = endLine - 1;
+
+  } else {
+        cmdstr.str("");
+        cmdstr << "wc -l " << readFile3;
+
+        endLine = exec(cmdstr.str().c_str());
+  }
+
+   cmdstr.str("");
+   cmdstr << "sed '" << startLine << "," << endLine << "p;d' " << readFile3 << " > " << sKmerDir;
+   if(PE == 1)      cmdstr << "/sKmer_3_1_";
+   else if(PE == 2) cmdstr << "/sKmer_3_2_";
+   else if(PE == 0) cmdstr << "/sKmer_3_";
+
+   cmdstr << rank << "." << typeFile;
+
+   cerr << cmdstr.str() << endl;
+   Execute_command(cmdstr.str().c_str());
+   MPI_Barrier(MPI_COMM_WORLD);
+}
+
+// Lane 4
+
+if(!readFile4.empty()) {
+
+   cmdstr.str("");
+   cmdstr << "wc -l " << headerFile4;
+
+   numLine = exec(cmdstr.str().c_str());
+
+   nlines = numLine / (unsigned long long)numranks;
+   remain = numLine % (unsigned long long)numranks;
+
+   for(unsigned long long i=0; i<(unsigned long long)numranks; i++) {
+        unsigned long long interval = nlines;
+        if(i<remain) { interval++; }
+
+        if(i == 0) START[i] = 1;
+        else       START[i] = END[i-1] + 1;
+        END[i] = START[i] + interval - 1;
+   }
+
+   cmdstr.str("");
+   cmdstr << "sed '" << START[rank] << "q;d' " << headerFile4;
+
+   startLine = exec(cmdstr.str().c_str());
+
+   if(rank < (numranks-1)) {
+        unsigned long long dummy = END[rank]+1;
+        cmdstr.str("");
+        cmdstr << "sed '" << dummy << "q;d' " << headerFile4;
+
+        endLine = exec(cmdstr.str().c_str());
+        endLine = endLine - 1;
+
+  } else {
+        cmdstr.str("");
+        cmdstr << "wc -l " << readFile4;
+
+        endLine = exec(cmdstr.str().c_str());
+  }
+
+   cmdstr.str("");
+   cmdstr << "sed '" << startLine << "," << endLine << "p;d' " << readFile4 << " > " << sKmerDir;
+   if(PE == 1)      cmdstr << "/sKmer_4_1_";
+   else if(PE == 2) cmdstr << "/sKmer_4_2_";
+   else if(PE == 0) cmdstr << "/sKmer_4_";
+
+   cmdstr << rank << "." << typeFile;
+
+   cerr << cmdstr.str() << endl;
+   Execute_command(cmdstr.str().c_str());
+   MPI_Barrier(MPI_COMM_WORLD);
+}
+
+   MPI_Barrier(MPI_COMM_WORLD);
+
+   free(START);
+   free(END);
+
+   MPI_Finalize();
+   return(0);
+
+}
+
+

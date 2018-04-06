@@ -922,131 +922,6 @@ if( !freq_filename.empty() ) {
 
  if(data.me == 0) {
 
-/*
-    ofstream statFile;
-
-    string stat_filename = "Stats_BaseCalls.txt";
-
-    statFile.open(stat_filename.c_str());
-
-    statFile << "no all PE reads = "    << num_all_PEs      << endl;
-    statFile << "no. total k-mers = "   << num_all_kmers    << endl;
-    statFile << "no. error k-mers = "   << num_all_ekmers   << endl;
-    statFile << "no cfDNAs = "          << num_cfDNAs_input << endl;
-    statFile << "no cfDNAs highdup = "  << num_highdup      << endl;
-    statFile << "no cfDNAs single = "   << num_singleton    << endl;
-    statFile << "no cfDNAs final = "    << num_final_cfDNAs << endl;
-
-    int e_ga1 = 0;
-    int e_ga2 = 0;
-    for(int k=20; k<QS_range; k++) { e_ga1 += data.qs1_count[k][0][1]; e_ga2 += data.qs2_count[k][0][1]; }
-
-    int e_gt1 = 0;
-    int e_gt2 = 0;
-    for(int k=20; k<QS_range; k++) { e_gt1 += data.qs1_count[k][0][2]; e_gt2 += data.qs2_count[k][0][2]; }
-
-    int e_gc1 = 0;
-    int e_gc2 = 0;
-    for(int k=20; k<QS_range; k++) { e_gc1 += data.qs1_count[k][0][3]; e_gc2 += data.qs2_count[k][0][3]; }
-
-
-    int e_ag1 = 0;
-    int e_ag2 = 0;
-    for(int k=20; k<QS_range; k++) { e_ag1 += data.qs1_count[k][1][0]; e_ag2 += data.qs2_count[k][1][0]; }
-
-    int e_at1 = 0;
-    int e_at2 = 0;
-    for(int k=20; k<QS_range; k++) { e_at1 += data.qs1_count[k][1][2]; e_at2 += data.qs2_count[k][1][2]; }
-
-    int e_ac1 = 0;
-    int e_ac2 = 0;
-    for(int k=20; k<QS_range; k++) { e_ac1 += data.qs1_count[k][1][3]; e_ac2 += data.qs2_count[k][1][3]; }
-
-
-    int e_tg1 = 0;
-    int e_tg2 = 0;
-    for(int k=20; k<QS_range; k++) { e_tg1 += data.qs1_count[k][2][0]; e_tg2 += data.qs2_count[k][2][0]; }
-
-    int e_ta1 = 0;
-    int e_ta2 = 0;
-    for(int k=20; k<QS_range; k++) { e_ta1 += data.qs1_count[k][2][1]; e_ta2 += data.qs2_count[k][2][1]; }
-
-    int e_tc1 = 0;
-    int e_tc2 = 0;
-    for(int k=20; k<QS_range; k++) { e_tc1 += data.qs1_count[k][2][3]; e_tc2 += data.qs2_count[k][2][3]; }
-
-
-    int e_cg1 = 0;
-    int e_cg2 = 0;
-    for(int k=20; k<QS_range; k++) { e_cg1 += data.qs1_count[k][3][0]; e_cg2 += data.qs2_count[k][3][0]; }
-
-    int e_ca1 = 0;
-    int e_ca2 = 0;
-    for(int k=20; k<QS_range; k++) { e_ca1 += data.qs1_count[k][3][1]; e_ca2 += data.qs2_count[k][3][1]; }
-
-    int e_ct1 = 0;
-    int e_ct2 = 0;
-    for(int k=20; k<QS_range; k++) { e_ct1 += data.qs1_count[k][3][2]; e_ct2 += data.qs2_count[k][3][2]; }
-
-    unsigned long long noBase_1 = 0;
-    unsigned long long noBase_2 = 0;
-    for(int k=0; k<4; k++) { noBase_1 += data.ATGC1[k]; noBase_2 += data.ATGC2[k]; }
-
-    statFile << endl;
-    statFile << "G>A " << (double)e_ga1/(double)noBase_1 << "\t" << (double)e_ga2/(double)noBase_2 << endl;
-    statFile << "G>T " << (double)e_gt1/(double)noBase_1 << "\t" << (double)e_gt2/(double)noBase_2 << endl;
-    statFile << "G>C " << (double)e_gc1/(double)noBase_1 << "\t" << (double)e_gc2/(double)noBase_2 << endl;
-
-    statFile << "A>G " << (double)e_ag1/(double)noBase_1 << "\t" << (double)e_ag2/(double)noBase_2 << endl;
-    statFile << "A>T " << (double)e_at1/(double)noBase_1 << "\t" << (double)e_at2/(double)noBase_2 << endl;
-    statFile << "A>C " << (double)e_ac1/(double)noBase_1 << "\t" << (double)e_ac2/(double)noBase_2 << endl;
-
-    statFile << "T>G " << (double)e_tg1/(double)noBase_1 << "\t" << (double)e_tg2/(double)noBase_2 << endl;
-    statFile << "T>A " << (double)e_ta1/(double)noBase_1 << "\t" << (double)e_ta2/(double)noBase_2 << endl;
-    statFile << "T>C " << (double)e_tc1/(double)noBase_1 << "\t" << (double)e_tc2/(double)noBase_2 << endl;
-
-    statFile << "C>G " << (double)e_cg1/(double)noBase_1 << "\t" << (double)e_cg2/(double)noBase_2 << endl;
-    statFile << "C>A " << (double)e_ca1/(double)noBase_1 << "\t" << (double)e_ca2/(double)noBase_2 << endl;
-    statFile << "C>T " << (double)e_ct1/(double)noBase_1 << "\t" << (double)e_ct2/(double)noBase_2 << endl;
-
-    statFile << endl;
-    statFile << "# Guanine  on high_dup reads (+/-):\t" << data.ATGC1[0] << "\t" << data.ATGC2[0] << endl;
-    statFile << "# Adenine  on high_dup reads (+/-):\t" << data.ATGC1[1] << "\t" << data.ATGC2[1] << endl;
-    statFile << "# Thymine  on high_dup reads (+/-):\t" << data.ATGC1[2] << "\t" << data.ATGC2[2] << endl;
-    statFile << "# Cytosine on high_dup reads (+/-):\t" << data.ATGC1[3] << "\t" << data.ATGC2[3] << endl;
-
-    unsigned long long GC = data.ATGC1[0] + data.ATGC1[3];
-    unsigned long long tB = 0; for(int k=0; k<4; k++) tB += data.ATGC1[k];
-    statFile << endl;
-    statFile << "GC content on high_dup reads (+) %:\t" << (double)GC/(double)tB << endl;
-
-    GC = data.ATGC2[0] + data.ATGC2[3];
-    tB = 0; for(int k=0; k<4; k++) tB += data.ATGC2[k];
-    statFile << "GC content on high_dup reads (-) %:\t" << (double)GC/(double)tB << endl;
-
-    statFile << endl;
-    statFile << "# Guanine  Error removed on singletons (+/-):\t" << data.eBase1[0] << "\t" << data.eBase2[0] << endl;
-    statFile << "# Adenine  Error removed on singletons (+/-):\t" << data.eBase1[1] << "\t" << data.eBase2[1] << endl;
-    statFile << "# Thymine  Error removed on singletons (+/-):\t" << data.eBase1[2] << "\t" << data.eBase2[2] << endl;
-    statFile << "# Cytosine Error removed on singletons (+/-):\t" << data.eBase1[3] << "\t" << data.eBase2[3] << endl;
-
-    statFile << endl;
-    statFile << "# Guanine  bases on singletons (+/-):\t" << data.sBase1[0] << "\t" << data.sBase2[0] << endl;
-    statFile << "# Adenine  bases on singletons (+/-):\t" << data.sBase1[1] << "\t" << data.sBase2[1] << endl;
-    statFile << "# Thymine  bases on singletons (+/-):\t" << data.sBase1[2] << "\t" << data.sBase2[2] << endl;
-    statFile << "# Cytosine bases on singletons (+/-):\t" << data.sBase1[3] << "\t" << data.sBase2[3] << endl;
-
-    unsigned long long sB_1 = 0; unsigned long long sB_2 = 0; for(int k=0; k<4; k++) { sB_1 += data.sBase1[k]; sB_2 += data.sBase2[k]; }
-
-    statFile << endl;
-    statFile << "% error(Guanine) removed on singletons (+/-):\t" << (double)data.eBase1[0]/(double)sB_1*100.0 << "\t" << (double)data.eBase2[0]/(double)sB_2*100.0 << endl;
-    statFile << "% error(Adenine) removed on singletons (+/-):\t" << (double)data.eBase1[1]/(double)sB_1*100.0 << "\t" << (double)data.eBase2[1]/(double)sB_2*100.0 << endl;
-    statFile << "% error(Thymine) removed on singletons (+/-):\t" << (double)data.eBase1[2]/(double)sB_1*100.0 << "\t" << (double)data.eBase2[2]/(double)sB_2*100.0 << endl;
-    statFile << "% error(Cytosine) removed on singletons (+/-):\t" << (double)data.eBase1[3]/(double)sB_1*100.0 << "\t" << (double)data.eBase2[3]/(double)sB_2*100.0 << endl;
-
-    statFile.close();
-*/
-
     for(int i=1; i<=22; i++) 
 	data.outFile << "@SQ" << "\t" << "SN:" << i << "\t" << "LN:" << data.reference_sequence[i].length() << endl; 
 
@@ -1063,7 +938,6 @@ if( !freq_filename.empty() ) {
  mrLink->map(mrLink, map_print2samformat_removeSoftClip, &data);
 
  data.outFile.close();
-
 
 
 // ###########################################################################

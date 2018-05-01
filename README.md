@@ -6,8 +6,8 @@ Circulating-free DNA (cfDNA) profiling by sequencing is an important minimally i
 
 ## Publication:
 
-__PCR Error Correction (PEC): a sensitive algorithm to improve mutation detection in cell free DNA__ (2017)
-CS Kim, S Mohan, M Ayub, M Carter, L Priest, F Blackhall, DG Rothwell, C Dive, G Brady and C Miller (Submitted to Genome Biology)
+__In silico error correction algorithm improves cfDNA mutation calling__ 
+CS Kim, S Mohan, M Ayub, DG Rothwell, C Dive, G Brady and C Miller (Manuscript submitted)
 
 ## Contact:
 

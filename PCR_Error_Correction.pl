@@ -85,6 +85,8 @@ my $Chromosome;
 my $SampleName="SampleName";
 my $Soft_Allow;
 
+$PE_Single = "PE";
+
 ## Performance monitoring options 
 my $pm_logfile = "pcrError.timing";
 my $pm_pcrError_start=0;
@@ -203,8 +205,6 @@ print "Current settings:\n$curr_limit_settings\n\n";
 
 my $MKDIR_OUTDIR_FLAG = 0;
 my $MKDIR_OUTREF_FLAG = 0;
-
-#$PE_Single = "PE";
 
 main: {
 

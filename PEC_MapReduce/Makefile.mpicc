@@ -1,16 +1,16 @@
 # MPI-based makefile using mpic++ and mpicc
 
-MR_INC = /home/ckim/LIBs/mrmpi-7Apr14/src 
-MR_LIB = /home/ckim/LIBs/mrmpi-7Apr14/src/libmrmpi_mpicc.a 
+MR_INC = ../LIBs/mrmpi-7Apr14/src/ 
+MR_LIB = ../LIBs/mrmpi-7Apr14/src/libmrmpi_mpicc.a 
 
-Zlib_INC = /apps/modules/pkg/libs/zlib/1.2.8/gcc-4.4.7/include/ 
-Zlib_LIB = /apps/modules/pkg/libs/zlib/1.2.8/gcc-4.4.7/lib/libz.a 
+Zlib_INC = ../LIBs/ZLIB/include/ 
+Zlib_LIB = ../LIBs/ZLIB/lib/libz.a 
 
 CC =		mpicxx
 CXX =		mpicxx 
-CCFLAGS =	-std=c++0x -m64 -g -O2 -Wno-long-long -Wno-deprecated -I$(MR_INC) -I$(Zlib_INC)
+CCFLAGS =	-std=c++0x -m64 -g -O2 -Wno-deprecated -I$(MR_INC) -I$(Zlib_INC)
 LINK =		mpicxx
-LINKFLAGS =	-std=c++0x -m64 -g -O2 -Wno-long-long -Wno-deprecated 
+LINKFLAGS =	-std=c++0x -m64 -g -O2 -Wno-deprecated 
 USRLIB_0 =	$(MR_LIB) 
 USRLIB_1 = 	$(Zlib_LIB) 
 USRLIB_2 =	

@@ -938,6 +938,7 @@ if( !freq_filename.empty() ) {
 
  data.outFile.close();
 
+ MPI_Barrier(MPI_COMM_WORLD);
 
 // ###########################################################################
 

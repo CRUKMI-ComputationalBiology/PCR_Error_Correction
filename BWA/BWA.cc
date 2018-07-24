@@ -161,58 +161,6 @@ if(PE == 1) {
         return 1;
   }
 
-/*
-  fstr.str("");
-  fstr << bwaDIR << "/sKmer_2_" << rank << "." << typeFile;
-  if(fexists(fstr.str().c_str())) {
-
-     cmdstr.str("");
-     cmdstr << "bwa mem -K 100000 -v 0 -t "  << num_threads;
-     cmdstr << " -M " << refFile;
-     cmdstr << " " << bwaDIR << "/sKmer_2_" << rank << "." << typeFile;
-     cmdstr << " | grep -v \"^@\" | awk '{print $1 \"\t\" $3 \"\t\" $4 \"\t\" $5 \"\t\" $6 \"\t\" $2 \"\t\" 2; }' >> " << bwaDIR << "/bfiltered_" << rank << ".out";
-
-     cerr << "CMD on rank " << rank << " : " << cmdstr.str() << endl;
-     system(cmdstr.str().c_str());
-
-     MPI_Barrier(MPI_COMM_WORLD);
-
- }
-
-  fstr.str("");
-  fstr << bwaDIR << "/sKmer_3_" << rank << "." << typeFile;
-  if(fexists(fstr.str().c_str())) {
-
-     cmdstr.str("");
-     cmdstr << "bwa mem -K 100000 -v 0 -t "  << num_threads;
-     cmdstr << " -M " << refFile;
-     cmdstr << " " << bwaDIR << "/sKmer_3_" << rank << "." << typeFile;
-     cmdstr << " | grep -v \"^@\" | awk '{print $1 \"\t\" $3 \"\t\" $4 \"\t\" $5 \"\t\" $6 \"\t\" $2 \"\t\" 3; }' >> " << bwaDIR << "/bfiltered_" << rank << ".out";
-
-     cerr << "CMD on rank " << rank << " : " << cmdstr.str() << endl;
-     system(cmdstr.str().c_str());
-
-     MPI_Barrier(MPI_COMM_WORLD);
-  }
-
-  fstr.str("");
-  fstr << bwaDIR << "/sKmer_4_" << rank << "." << typeFile;
-  if(fexists(fstr.str().c_str())) { 
-
-     cmdstr.str("");
-     cmdstr << "bwa mem -K 100000 -v 0 -t "  << num_threads;
-     cmdstr << " -M " << refFile;
-     cmdstr << " " << bwaDIR << "/sKmer_4_" << rank << "." << typeFile;
-     cmdstr << " | grep -v \"^@\" | awk '{print $1 \"\t\" $3 \"\t\" $4 \"\t\" $5 \"\t\" $6 \"\t\" $2 \"\t\" 4; }' >> " << bwaDIR << "/bfiltered_" << rank << ".out";
-
-     cerr << "CMD on rank " << rank << " : " << cmdstr.str() << endl;
-     system(cmdstr.str().c_str());  
-
-     MPI_Barrier(MPI_COMM_WORLD);
-
-  }
-*/
-
 }
 
   MPI_Finalize();

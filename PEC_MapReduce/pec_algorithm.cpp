@@ -324,7 +324,6 @@ while( data.On_Target ) {
 }
 
   data.loc_vector--;
-
   if(data.me == 0) cerr << endl << " The number of target exons =  \t" << data.loc_vector << endl << endl;
 
 // ###############################################

@@ -36,7 +36,7 @@ SHAREDLIBV=libz.1.2.11.dylib
 SHAREDLIBM=libz.1.dylib
 LIBS=$(STATICLIB) $(SHAREDLIBV)
 
-AR=libtool
+AR=/usr/bin/libtool
 ARFLAGS=-o
 RANLIB=ranlib
 LDCONFIG=ldconfig

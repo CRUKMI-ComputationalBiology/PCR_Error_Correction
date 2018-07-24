@@ -112,22 +112,24 @@ int main(int argc,char** argv)
   }
 
   stringstream cmdstr;
-  stringstream fstr;
+  stringstream fstr, fstr_1, fstr_2;
 
   MPI_Barrier(MPI_COMM_WORLD);
 
 if(PE == 1) {
 
-  fstr.str("");
-  fstr << bwaDIR << "/sKmer_" << lane_index << "_1_" << rank << "." << typeFile;
-  if(fexists(fstr.str().c_str())) {
+  fstr_1.str("");
+  fstr_1 << bwaDIR << "/sKmer_" << lane_index << "_1_" << rank << "." << typeFile;
+  fstr_2.str("");
+  fstr_2 << bwaDIR << "/sKmer_" << lane_index << "_2_" << rank << "." << typeFile;
+  if(fexists(fstr_1.str().c_str()) && fexists(fstr_2.str().c_str())) {
 
      cmdstr.str("");
      cmdstr << "bwa mem -t " << num_threads << " -v 0 -K 100000 -M -S " << refFile;
      cmdstr << " " << bwaDIR << "/sKmer_"<< lane_index << "_1_" << rank << "." << typeFile << " " << bwaDIR << "/sKmer_" << lane_index << "_2_" << rank << "." << typeFile;
      cmdstr << " | grep -v \"^@\" | awk '{print $1 \"\t\" $3 \"\t\" $4 \"\t\" $5 \"\t\" $6 \"\t\" $2 \"\t\" 1; }' >> " << bwaDIR << "/bfiltered_" << rank << ".out";  
 
-     cerr << "CMD on rank " << rank << " : " << cmdstr.str() << endl;
+     if(rank == 0) cerr << "CMD on rank " << rank << " : " << cmdstr.str() << endl;
      system(cmdstr.str().c_str());  
 
      MPI_Barrier(MPI_COMM_WORLD);
@@ -146,10 +148,10 @@ if(PE == 1) {
      cmdstr.str("");
      cmdstr << "bwa mem -K 100000 -v 0 -t "  << num_threads;
      cmdstr << " -M " << refFile;
-     cmdstr << " " << bwaDIR << "/sKmer_" << lane_index << "_" << rank << "." << typeFile;
+     cmdstr << " " << bwaDIR << "/sKmer_" << lane_index << "_1_" << rank << "." << typeFile;
      cmdstr << " | grep -v \"^@\" | awk '{print $1 \"\t\" $3 \"\t\" $4 \"\t\" $5 \"\t\" $6 \"\t\" $2 \"\t\" 1; }' >> " << bwaDIR << "/bfiltered_" << rank << ".out";
 
-     cerr << "CMD on rank " << rank << " : " << cmdstr.str() << endl;
+     if(rank == 0) cerr << "CMD on rank " << rank << " : " << cmdstr.str() << endl;
      system(cmdstr.str().c_str());
 
      MPI_Barrier(MPI_COMM_WORLD);
@@ -159,6 +161,7 @@ if(PE == 1) {
         return 1;
   }
 
+/*
   fstr.str("");
   fstr << bwaDIR << "/sKmer_2_" << rank << "." << typeFile;
   if(fexists(fstr.str().c_str())) {
@@ -175,7 +178,6 @@ if(PE == 1) {
      MPI_Barrier(MPI_COMM_WORLD);
 
  }
-
 
   fstr.str("");
   fstr << bwaDIR << "/sKmer_3_" << rank << "." << typeFile;
@@ -209,6 +211,7 @@ if(PE == 1) {
      MPI_Barrier(MPI_COMM_WORLD);
 
   }
+*/
 
 }
 

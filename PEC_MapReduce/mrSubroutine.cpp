@@ -109,10 +109,17 @@ void fileread_Sequence_Fastq(int itask, KeyValue *kv, void *ptr)
 
         if(contains_non_gatc_num(seq,5)) {
 
-           std::size_t pos = header.find_first_of(" ");
+	   HeadSeq header_seq;
 
-           HeadSeq header_seq;
-           memcpy(header_seq.header, header.substr(0,(int)pos).c_str(), sizeof(char)*((int)pos));
+           std::size_t pos_1 = header.find_first_of(" ");
+           std::size_t pos_2 = header.find_first_of("/");
+ 
+           if(pos_1 != std::string::npos)      memcpy(header_seq.header, header.substr(0,(int)pos_1).c_str(), sizeof(char)*((int)pos_1));
+	   else if(pos_2 != std::string::npos) memcpy(header_seq.header, header.substr(0,(int)pos_2).c_str(), sizeof(char)*((int)pos_2));
+	   else {
+    		printf("ERROR: Could not query headers in input fastq file, check the manual of the software!!! \n");
+    		MPI_Abort(MPI_COMM_WORLD,1);
+	   }
 
           if(     PairEnd == 1) header_seq.PE = 1;
           else if(PairEnd == 2) header_seq.PE = 2;
@@ -122,7 +129,8 @@ void fileread_Sequence_Fastq(int itask, KeyValue *kv, void *ptr)
             memcpy(header_seq.quality, quality.c_str(), sizeof(char)*data->range);
             header_seq.length = data->range;
 
-            kv->add((char *) header_seq.header, sizeof(char)*((int)pos), (char *) &header_seq, sizeof(HeadSeq) );
+            if(pos_1 != std::string::npos)      kv->add((char *) header_seq.header, sizeof(char)*((int)pos_1), (char *) &header_seq, sizeof(HeadSeq) );
+	    else if(pos_2 != std::string::npos) kv->add((char *) header_seq.header, sizeof(char)*((int)pos_2), (char *) &header_seq, sizeof(HeadSeq) );
           }
 
         }
@@ -747,7 +755,7 @@ void reduce_LinkID_HeadSeq(char *key, int keybytes, char *multivalue, int nvalue
 
 	 HeadSeq headseq = *(HeadSeq *) value;	
 
-	 if(headseq.PE == 1) {
+	 if((headseq.PE == 1) && (headseq.length == data->range)) {
 		headseq.strand  = locInfo->strand1;
 		headseq.maq     = locInfo->maq1;
 		if(headseq.strand < 0) {
@@ -758,7 +766,7 @@ void reduce_LinkID_HeadSeq(char *key, int keybytes, char *multivalue, int nvalue
 
 		headseq_pair[0] = headseq;
                 nH += 1;	
-	 } else if(headseq.PE == 2) {
+	 } else if((headseq.PE == 2) && (headseq.length == data->range)) {
 		headseq.strand  = locInfo->strand2;
                 headseq.maq     = locInfo->maq2;
                 if(headseq.strand < 0) {
@@ -1028,7 +1036,7 @@ void reduce_error_kmers(char *key, int keybytes, char *multivalue, int nvalues, 
 
    if(     (num_trusted >= 2) && (num_untrusted == 1)  && (data->ftype == 0)) kv->add(key, keybytes, key, keybytes);
    else if((num_trusted == 0) && (num_untrusted  > 0)  && (data->ftype == 1)) kv->add(key, keybytes, key, keybytes);
-   else if((num_trusted == 0) &&                          (data->ftype == 2)) kv->add(key, keybytes, key, keybytes);
+   else if((num_trusted == 0) && (data->ftype == 2)) kv->add(key, keybytes, key, keybytes);
 
 //   if(num_trusted == 0) kv->add(key, keybytes, key, keybytes);
 

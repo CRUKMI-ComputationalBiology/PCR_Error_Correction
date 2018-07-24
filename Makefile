@@ -33,6 +33,7 @@ clean:
 	cd LIBs/mrmpi-7Apr14/src/ && make clean-mpicc
 	cd LIBs/mrmpi-7Apr14/src/ && rm libmrmpi_mpicc.a
 	cd LIBs && rm -r ZLIB
+	cd LIBs/zlib-1.2.11/ && make clean
 	cd PEC_MapReduce && $(MAKE) -f Makefile.mpicc clean
 	cd Fasta_Splitter_PE && $(MAKE) clean 
 	cd BWA && $(MAKE) clean

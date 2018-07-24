@@ -232,7 +232,7 @@ void map_upload_reference(int itask, KeyValue *kv, void *ptr)
         if( (loc % data->nprocs) == data->me ) {
 
           std::size_t pos = header.find_first_of(" ");
-          int chr;
+          int chr = 0;
 
           if( strcmp(header.substr(0,pos).c_str(), "1") == 0) chr = 1;
           else if( strcmp(header.substr(0,pos).c_str(), "2") == 0) chr = 2;

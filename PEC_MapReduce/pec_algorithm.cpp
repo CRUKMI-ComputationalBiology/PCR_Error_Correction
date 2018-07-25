@@ -215,7 +215,7 @@ int main(int narg, char **args)
 
  data.MIN_CONNECTIVITY_RATIO = 0.0;
  data.MIN_ASSEMBLY_LENGTH = 1; //data.kmer_length;
- data.MIN_ASSEMBLY_COVERAGE = 0.1;
+ data.MIN_ASSEMBLY_COVERAGE = 3;
 
 // ##################################################
 //

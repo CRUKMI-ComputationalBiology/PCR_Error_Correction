@@ -1042,9 +1042,9 @@ bool untrusted_intersect(vector<int> untrusted_subset, vector<short> & region, i
     }
  }
    
- for(short i = start; i <= end; i++)
-    region.push_back(i);
- return true;
+ for(short i = start; i <= end; i++) region.push_back(i);
+ if(region.empty()) return false;
+ else		    return true;
 }
 
 void untrusted_union(vector<int> untrusted_subset, vector<short> & region, int kmer_length) {
@@ -1073,8 +1073,7 @@ if(untrusted_intersect(untrusted_subset, region, kmer_length, read_length)) {
     vector<short> front_chop(region);
     region.clear();
     for(int i = 0; i < front_chop.size(); i++) {
-      if(front_chop[i] > right_leftkmer+kmer_length-1)
-        region.push_back(front_chop[i]);
+      if(front_chop[i] > right_leftkmer+kmer_length-1) region.push_back(front_chop[i]);
     }
 
   } else {
@@ -1087,8 +1086,7 @@ if(untrusted_intersect(untrusted_subset, region, kmer_length, read_length)) {
     vector<short> back_chop(region);
     region.clear();
     for(int i = 0; i < back_chop.size(); i++) {
-      if(back_chop[i] < left_rightkmer)
-        region.push_back(back_chop[i]);
+      if(back_chop[i] < left_rightkmer) region.push_back(back_chop[i]);
     }
 
   } else {

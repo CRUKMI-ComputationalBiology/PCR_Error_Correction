@@ -50,14 +50,14 @@ my $MR_PAGE_SIZE = 1024;
 my $KMER_SIZE = 25;
 
 # option list:
-my ($seqType, @left_files, @right_files, @single_files, 
+my (@left_files, @right_files, @single_files, 
     $output_directory, $outdir_freqTable, $outdir_SNVCall,
     $PE_Single, $flist_reads, $WhichStep 
    );
 
 my %allowed =
-    ( seqType       => 'fa or fq',
-      PE_single	    => 'PE',
+    ( 
+      PE_single	    => 'PE'
     );
 
 my %allowed_check;
@@ -71,7 +71,7 @@ foreach my $all (keys %allowed) {
 $output_directory = &create_full_path("pcrError_out_dir");
 
 my $ref_file;
-my $ftype;
+my $ftype = "fq";
 my $MAQ = 10;
 my $BQScore = 20;
 my $Overlap_eKmer = 0;
@@ -109,7 +109,6 @@ my $cutoff_log10Pv = 2;
 my $alpha_power    = 0.01;
 
 my $Polishing_mode = 1;
-
 #my $start_dir = cwd();
 
 my $usage = <<_EOUSAGE_;
@@ -118,7 +117,6 @@ my $usage = <<_EOUSAGE_;
 # PCR Error Correction algorithm input parameters   
 ###################################################################
 #
-#  --ftype <string>      :type of reads: ( $allowed{seqType} ) 
 #  --Ref <string>        :reference sequence in fasta format 
 #
 #  --output <string>     :output bam filename without ".bam"
@@ -167,7 +165,6 @@ my $NO_FASTOOL = 0;
 
     "input_list=s"       => \$flist_reads,
 
-    "ftype=s"		=> \$ftype,
     "SM=s"		=> \$SampleName,
 
     "PE_Single=s"     	=> \$PE_Single,
@@ -189,8 +186,17 @@ my $NO_FASTOOL = 0;
     'chromosome=i'	=> \$Chromosome,
     'Soft_Allow=f'	=> \$Soft_Allow,
     'Polising_Mode=i'   => \$Polishing_mode,	
+#   "ftype=s"           => \$ftype,
 
 );
+
+unless( $ref_file) { print "\n\n Reference Genome fasta file was not given. Please check your input parameters for \"--Ref\" \n\n";  exit(0); }
+unless( -e $ref_file) { print "\n\n Reference Genome fasta file does not exit. Please check your Reference Genome fasta file \n\n";  exit(0); }
+unless( -z $ref_file) { print "\n\n Reference Genome fasta file is empty. Please check your Reference Genome fasta file \n\n";  exit(0); }
+
+unless( $flist_reads) { print "\n\n Input fastq file list was not given. Please check your input parameters for \"--input_list\" \n\n";  exit(0); }
+unless( -e $flist_reads) { print "\n\n Input fastq file list does not exit. Please check your input file list \n\n";  exit(0); }
+unless( -z $flist_reads) { print "\n\n Input fastq file list is empty. Please check your input file list \n\n";  exit(0); }
 
 
 my $curr_limit_settings = `/bin/sh -c 'ulimit -a' `; 

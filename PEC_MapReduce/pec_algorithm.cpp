@@ -81,7 +81,7 @@ int main(int narg, char **args)
   data.bQscore = 20;
   data.soft_allow = 0.0;
 
-  data.On_Target = true;
+  data.On_Target = false;
 
   data.On_Polishing = false;
 

@@ -1,0 +1,1 @@
+1 1 'Your PEC installation directory'/TestData PEC_Test_R1.fastq PEC_Test_R2.fastq

@@ -379,9 +379,13 @@ void fileread_AlignmentInfo_MPI(int itask, KeyValue *kv, void *ptr)
           bool isOnTarget = check_onTarget(read.chr, (read.loc - read.SOFT_S), (read.loc + read.align_len - 1 + read.SOFT_E), data->loc_vector, 1000, data->_target_loc );
           int sallow = data->range - (int)( (float)data->range * data->soft_allow);
 
-          if( isOnTarget && (check_780 == 0) && (check_2 == 2) && ((read.pe == 1) || (read.pe == 2)) && (read.align_len >= read.align_len) )  {
-            kv->add((char *) name.c_str(), sizeof(char) * name.length(), (char *) &read, sizeof(sReadInfo));
-          }
+	  if(data->On_Target) {
+               if( isOnTarget && (check_780 == 0) && (check_2 == 2) && ((read.pe == 1) || (read.pe == 2)) && (read.align_len >= read.align_len) )  
+                  kv->add((char *) name.c_str(), sizeof(char) * name.length(), (char *) &read, sizeof(sReadInfo));
+	  } else {
+	       if( (check_780 == 0) && (check_2 == 2) && ((read.pe == 1) || (read.pe == 2)) && (read.align_len >= read.align_len) )  
+                  kv->add((char *) name.c_str(), sizeof(char) * name.length(), (char *) &read, sizeof(sReadInfo));
+	  }
 
         }
 

@@ -10,7 +10,7 @@ __In silico error correction algorithm improves cfDNA mutation calling__: CS Kim
 
 ## Contact:
 
-         Chang Sik Kim (chang.kim@cruk.manchester.ac.uk)
+         Chang Sik Kim (kim.chang.sik@gmail.com)
          
          Crispin Miller (crispin.miller@cruk.manchester.ac.uk)
 

@@ -18,4 +18,3 @@ Full installation and usage instructions can be found at: <https://github.com/CR
          
          Crispin Miller (crispin.miller@cruk.manchester.ac.uk)
 
-For information about the installation and usage, please go to the following wiki page: <https://github.com/CRUKMI-ComputationalBiology/PCR_Error_Correction/wiki>.

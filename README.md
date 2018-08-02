@@ -8,6 +8,10 @@ Circulating-free DNA (cfDNA) profiling by sequencing is an important minimally i
 
 __In silico error correction algorithm improves cfDNA mutation calling__: CS Kim, S Mohan, M Ayub, DG Rothwell, C Dive, G Brady and C Miller (Manuscript submitted)
 
+## Installation:
+
+Full installation and usage instructions can be found at: <https://github.com/CRUKMI-ComputationalBiology/PCR_Error_Correction/wiki>.
+
 ## Contact:
 
          Chang Sik Kim (kim.chang.sik@gmail.com)

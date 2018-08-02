@@ -192,11 +192,11 @@ my $NO_FASTOOL = 0;
 
 unless( $ref_file) { print "\n\n Reference Genome fasta file was not given. Please check your input parameters for \"--Ref\" \n\n";  exit(0); }
 unless( -e $ref_file) { print "\n\n Reference Genome fasta file does not exit. Please check your Reference Genome fasta file \n\n";  exit(0); }
-unless( -z $ref_file) { print "\n\n Reference Genome fasta file is empty. Please check your Reference Genome fasta file \n\n";  exit(0); }
+#unless( -z $ref_file) { print "\n\n Reference Genome fasta file is empty. Please check your Reference Genome fasta file \n\n";  exit(0); }
 
 unless( $flist_reads) { print "\n\n Input fastq file list was not given. Please check your input parameters for \"--input_list\" \n\n";  exit(0); }
 unless( -e $flist_reads) { print "\n\n Input fastq file list does not exit. Please check your input file list \n\n";  exit(0); }
-unless( -z $flist_reads) { print "\n\n Input fastq file list is empty. Please check your input file list \n\n";  exit(0); }
+#unless( -z $flist_reads) { print "\n\n Input fastq file list is empty. Please check your input file list \n\n";  exit(0); }
 
 
 my $curr_limit_settings = `/bin/sh -c 'ulimit -a' `; 

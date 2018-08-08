@@ -32,7 +32,7 @@ use File::Path qw(remove_tree rmtree);
 use Cwd;
 use Carp;
 use Getopt::Long qw(:config no_ignore_case pass_through);
-use Math::Round qw/round/;
+#use Math::Round qw/round/;
 
 open (STDERR, ">&STDOUT"); 
 my $VERSION = "PCR Error Correctiopn (PEC) Algorithm Version 2, 14 Dec. 2017";

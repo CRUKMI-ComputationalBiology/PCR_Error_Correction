@@ -6,7 +6,7 @@ Circulating-free DNA (cfDNA) profiling by sequencing is an important minimally i
 
 ## Publication:
 
-CS Kim, S Mohan, M Ayub, DG Rothwell, C Dive, G Brady, and Crispin Miller (2018) __In silico error correction algorithm improves cfDNA mutation calling__ Bioinformatics, doi: 10.1093/bioinformatics/bty1004
+CS Kim, S Mohan, M Ayub, DG Rothwell, C Dive, G Brady, and Crispin Miller (2018) __In silico error correction algorithm improves cfDNA mutation calling.__ Bioinformatics, doi: 10.1093/bioinformatics/bty1004
 
 ## Installation:
 

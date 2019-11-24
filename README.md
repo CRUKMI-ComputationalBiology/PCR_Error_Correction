@@ -14,7 +14,7 @@ Full installation and usage instructions can be found at: <https://github.com/CR
 
 ## Contact:
 
-         Chang Sik Kim (kim.chang.sik@gmail.com)
+         Chang Sik Kim (c.kim@qub.ac.uk or kim.chang.sik@gmail.com)
          
-         Crispin Miller (crispin.miller@cruk.manchester.ac.uk)
+         Crispin Miller (C.Miller@beatson.gla.ac.uk)
 
